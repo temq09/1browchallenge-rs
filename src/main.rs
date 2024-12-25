@@ -1,4 +1,5 @@
 use std::{
+    char,
     cmp::{max, min},
     fs::File,
     io::{BufReader, Error, Read},
@@ -17,7 +18,7 @@ fn main() {
 }
 
 fn naive_implementastion() -> Result<(), Error> {
-    let file = File::open("/Users/artemushakov/prog/tmp/1billion/1brc/measurements.txt")?;
+    let file = File::open("/Users/artemushakov/prog/tmp/1binput/100k.txt")?;
     let mut reader = BufReader::new(file);
     let mut counter = 0;
 
@@ -66,14 +67,9 @@ fn extract_completed_data(data: &[u8]) -> usize {
     index
 }
 
-struct StationReading {
-    pub name: String,
-    pub temperature: i16,
-}
-
 #[derive(Clone)]
 struct TotalReading {
-    pub name: String,
+    pub name: StationName,
     pub min_temp: i16,
     pub max_temp: i16,
     pub sum_temp: i64,
@@ -81,7 +77,7 @@ struct TotalReading {
 }
 
 impl TotalReading {
-    fn new(name: String, tmp_value: i16) -> Self {
+    fn new(name: StationName, tmp_value: i16) -> Self {
         TotalReading {
             name,
             min_temp: tmp_value,
@@ -118,17 +114,20 @@ impl RawData {
     }
 }
 
+#[derive(Eq, PartialEq, Hash, Clone)]
+pub struct StationName(Vec<u8>);
+
 struct DataHolder {
     data: SplitHashMap,
 }
 
 pub(crate) mod data_structures {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, u8};
 
-    use crate::TotalReading;
+    use crate::{StationName, TotalReading};
 
     pub(crate) struct SplitHashMap {
-        data: HashMap<char, HashMap<String, TotalReading>>,
+        data: HashMap<u8, HashMap<StationName, TotalReading>>,
     }
 
     impl SplitHashMap {
@@ -138,15 +137,15 @@ pub(crate) mod data_structures {
             }
         }
 
-        pub(crate) fn get_mut(&mut self, name: &str) -> Option<&mut TotalReading> {
-            name.chars()
-                .next()
+        pub(crate) fn get_mut(&mut self, name: &StationName) -> Option<&mut TotalReading> {
+            name.0
+                .first()
                 .and_then(|symbol| self.data.get_mut(&symbol))
                 .map(|table| table.get_mut(name))?
         }
 
-        pub(crate) fn insert(&mut self, name: String, value: TotalReading) {
-            let first_symbol = name.chars().next().expect("Name must not be empty");
+        pub(crate) fn insert(&mut self, name: StationName, value: TotalReading) {
+            let first_symbol = name.0.first().expect("Name must not be empty").to_owned();
             match self.data.get_mut(&first_symbol) {
                 Some(table) => {
                     let _ = table.insert(name, value);
@@ -190,33 +189,51 @@ impl DataHolder {
     }
 
     fn append(&mut self, raw_data: &RawData) {
-        let mut buffer = String::new();
-        //let mut buffer = String::from_utf16(raw_data.data_prefix.as_slice()).unwrap();
+        let mut buffer = Vec::from_iter(raw_data.data_prefix.iter().cloned());
         let mut table = SplitHashMap::new();
 
         for element in raw_data.get_full_data_slice() {
             match element {
                 0x0A => {
-                    if let Some((name, value)) = buffer.split_once(';') {
-                        let value = (value.parse::<f32>().unwrap() * 10.0) as i16;
-                        match table.get_mut(name) {
-                            Some(raw_value) => {
-                                raw_value.min_temp = min(value, raw_value.min_temp);
-                                raw_value.max_temp = max(value, raw_value.max_temp);
-                                raw_value.sum_temp += value as i64;
-                                raw_value.temp_reading_count += 1;
-                            }
-                            None => {
-                                let reading = TotalReading::new(name.to_owned(), value);
-                                table.insert(name.to_owned(), reading);
-                            }
-                        };
+                    let delimeter_index = buffer
+                        .iter()
+                        .position(|&element| element == b';')
+                        .expect("delimeter not found for");
+
+                    let (name, value) = buffer.split_at(delimeter_index);
+                    let name = StationName(name.to_vec());
+                    let value = to_temperature(value);
+                    match table.get_mut(&name) {
+                        Some(raw_value) => {
+                            raw_value.min_temp = min(value, raw_value.min_temp);
+                            raw_value.max_temp = max(value, raw_value.max_temp);
+                            raw_value.sum_temp += value as i64;
+                            raw_value.temp_reading_count += 1;
+                        }
+                        None => {
+                            let reading = TotalReading::new(name.clone(), value);
+                            table.insert(name.to_owned(), reading);
+                        }
                     };
                     buffer.clear();
                 }
-                _ => buffer.push(*element as char),
+                _ => buffer.push(*element),
             };
         }
         self.data.merge(table);
     }
+}
+
+fn to_temperature(raw_data: &[u8]) -> i16 {
+    let multiplier: i16 = if raw_data[0].is_ascii_digit() { 1 } else { -1 };
+    let normalized = raw_data
+        .iter()
+        .cloned()
+        .filter(|symbol| symbol.is_ascii_digit())
+        .collect();
+
+    String::from_utf8(normalized)
+        .map(|x| x.parse::<i16>().unwrap())
+        .unwrap()
+        * multiplier
 }
