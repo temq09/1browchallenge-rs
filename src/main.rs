@@ -2,7 +2,8 @@ use std::{
     cmp::{max, min},
     fs::File,
     io::{self, BufReader, BufWriter, Error, Read, Write},
-    thread,
+    sync::{mpsc, Arc, Mutex},
+    thread::{self, ScopedJoinHandle},
     time::Instant,
 };
 
@@ -17,21 +18,36 @@ fn main() {
 }
 
 fn naive_implementastion() -> Result<(), Error> {
-    let file = File::open("/Users/artemushakov/prog/tmp/1binput/100k.txt")?;
+    let file = File::open("/Users/artemushakov/prog/tmp/1binput/1b.txt")?;
     let mut reader = BufReader::new(file);
     let mut counter = 0;
 
     thread::scope(|s| {
-        //for _ in 0..6 {
-        //    s.spawn(|| {
-        //        println!("test");
-        //    });
-        //}
+        let (tx, rx) = mpsc::channel::<RawData>();
+        let receiver = Arc::new(Mutex::new(rx));
+
+        let results = (0..9)
+            .map(|_| {
+                s.spawn({
+                    let receiver = receiver.clone();
+                    move || {
+                        let mut data_holder = DataHolder::new();
+                        loop {
+                            let Ok(raw_data) = receiver.lock().unwrap().recv() else {
+                                break;
+                            };
+
+                            data_holder.append(&raw_data);
+                        }
+                        data_holder
+                    }
+                })
+            })
+            .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
 
         let mut leftovers = Vec::new();
-        let mut data_holder = DataHolder::new();
         loop {
-            let mut buf = [0_u8; 1024 * 1000];
+            let mut buf = [0_u8; 1024];
             let count = reader.read(&mut buf).unwrap();
             if count == 0 {
                 break;
@@ -45,11 +61,22 @@ fn naive_implementastion() -> Result<(), Error> {
             let raw_data = RawData::new(leftovers.clone(), buf, non_complete_data_index);
             leftovers.clear();
             leftovers.extend(new_leftovers);
-            data_holder.append(&raw_data);
+            tx.send(raw_data).unwrap();
 
             counter += 1;
         }
-        let result = data_structures::prepare_result(data_holder);
+
+        drop(tx);
+
+        println!("read complete, waiting for conumer to finish");
+
+        let mut output = DataHolder::new();
+        for handle in results {
+            let result = handle.join().unwrap();
+            output.merge(result);
+        }
+
+        let result = data_structures::prepare_result(output);
         print_result(&result, Box::new(io::stdout()));
     });
 
@@ -98,12 +125,12 @@ impl TotalReading {
 
 struct RawData {
     pub data_prefix: Vec<u8>,
-    data: [u8; 1024000],
+    data: [u8; 1024],
     end_index: usize,
 }
 
 impl RawData {
-    fn new(data_prefix: Vec<u8>, data: [u8; 1024000], end_index: usize) -> Self {
+    fn new(data_prefix: Vec<u8>, data: [u8; 1024], end_index: usize) -> Self {
         RawData {
             data,
             end_index,
@@ -122,7 +149,6 @@ pub(crate) mod data_structures {
     use std::{
         cmp::{max, min},
         collections::HashMap,
-        u8,
     };
 
     use crate::{to_temperature, RawData, StationName, TotalReading};
@@ -171,6 +197,10 @@ pub(crate) mod data_structures {
                 };
             }
             self.data.merge(table);
+        }
+
+        pub(crate) fn merge(&mut self, data: DataHolder) {
+            self.data.merge(data.data)
         }
     }
 
