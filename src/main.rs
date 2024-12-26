@@ -27,17 +27,23 @@ fn naive_implementastion() -> Result<(), Error> {
         let receiver = Arc::new(Mutex::new(rx));
 
         let results = (0..9)
-            .map(|_| {
+            .map(|thread_id| {
                 s.spawn({
                     let receiver = receiver.clone();
                     move || {
                         let mut data_holder = DataHolder::new();
                         loop {
-                            let Ok(raw_data) = receiver.lock().unwrap().recv() else {
+                            let guard = receiver.lock().unwrap();
+                            //println!("thread {} start", thread_id);
+                            let Ok(raw_data) = guard.recv() else {
                                 break;
                             };
+                            drop(guard);
+
+                            //sleep(time::Duration::from_millis(1000));
 
                             data_holder.append(&raw_data);
+                            //println!("thread {} end", thread_id);
                         }
                         data_holder
                     }
@@ -47,8 +53,8 @@ fn naive_implementastion() -> Result<(), Error> {
 
         let mut leftovers = Vec::new();
         loop {
-            let mut buf = [0_u8; 1024];
-            let count = reader.read(&mut buf).unwrap();
+            let mut buf = vec![0; 1024 * 1000];
+            let count = reader.read(buf.as_mut_slice()).unwrap();
             if count == 0 {
                 break;
             }
@@ -125,12 +131,12 @@ impl TotalReading {
 
 struct RawData {
     pub data_prefix: Vec<u8>,
-    data: [u8; 1024],
+    data: Vec<u8>,
     end_index: usize,
 }
 
 impl RawData {
-    fn new(data_prefix: Vec<u8>, data: [u8; 1024], end_index: usize) -> Self {
+    fn new(data_prefix: Vec<u8>, data: Vec<u8>, end_index: usize) -> Self {
         RawData {
             data,
             end_index,
@@ -178,7 +184,7 @@ pub(crate) mod data_structures {
 
                         let (name, value) = buffer.split_at(delimeter_index);
                         let name = StationName(name.to_vec());
-                        let value = to_temperature(value);
+                        let value = to_temperature(&value[1..]);
                         match table.get_mut(&name) {
                             Some(raw_value) => {
                                 raw_value.min_temp = min(value, raw_value.min_temp);
@@ -272,18 +278,27 @@ pub(crate) mod data_structures {
     }
 }
 
-fn to_temperature(raw_data: &[u8]) -> i16 {
-    let multiplier: i16 = if raw_data[0].is_ascii_digit() { 1 } else { -1 };
-    let normalized = raw_data
-        .iter()
-        .cloned()
-        .filter(|symbol| symbol.is_ascii_digit())
-        .collect();
+static MULTIPLIYERS: [i16; 3] = [1, 10, 100];
 
-    String::from_utf8(normalized)
-        .map(|x| x.parse::<i16>().unwrap())
-        .unwrap()
-        * multiplier
+fn to_temperature(raw_data: &[u8]) -> i16 {
+    let mut temperature = 0;
+    let mut position = 0;
+    for index in (0..raw_data.len()).rev() {
+        let symbol = raw_data[index];
+        match symbol {
+            b'0'..=b'9' => {
+                temperature += (symbol - 48) as i16 * MULTIPLIYERS[position];
+                position += 1;
+            }
+            b'-' => {
+                temperature *= -1;
+            }
+            b'.' => continue,
+            _ => panic!("Unexpected symbol: {}", symbol),
+        }
+    }
+
+    temperature
 }
 
 fn print_result(readings: &Vec<TotalReading>, writer: Box<dyn Write>) {
