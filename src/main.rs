@@ -7,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+use bytes::{Bytes, BytesMut};
 use data_structures::DataHolder;
 
 fn main() {
@@ -18,32 +19,23 @@ fn main() {
 }
 
 fn naive_implementastion() -> Result<(), Error> {
-    let file = File::open("/home/temq/prog/workspace/tmp/1bl/1m.txt")?;
-    let mut reader = BufReader::new(file);
-    let mut counter = 0;
-
     thread::scope(|s| {
         let (tx, rx) = mpsc::channel::<RawData>();
         let receiver = Arc::new(Mutex::new(rx));
 
         let results = (0..7)
-            .map(|thread_id| {
+            .map(|_| {
                 s.spawn({
                     let receiver = receiver.clone();
                     move || {
                         let mut data_holder = DataHolder::new();
                         loop {
                             let guard = receiver.lock().unwrap();
-                            //println!("thread {} start", thread_id);
                             let Ok(raw_data) = guard.recv() else {
                                 break;
                             };
                             drop(guard);
-
-                            //sleep(time::Duration::from_millis(1000));
-
-                            data_holder.append(raw_data);
-                            //println!("thread {} end", thread_id);
+                            data_holder.append(raw_data.data);
                         }
                         data_holder
                     }
@@ -51,23 +43,20 @@ fn naive_implementastion() -> Result<(), Error> {
             })
             .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
 
-        let mut leftovers = Vec::new();
+        let file = File::open("/home/temq/prog/workspace/tmp/1bl/1b.txt").unwrap();
+        let mut reder = BufReader::new(file);
+        let mut counter = 0;
         loop {
-            let mut buf = vec![0; 1024 * 1000];
-            let count = reader.read(buf.as_mut_slice()).unwrap();
+            let mut buf = BytesMut::zeroed(1024 * 1000);
+            let count = reder.read(buf.as_mut()).unwrap();
             if count == 0 {
                 break;
             }
             let non_complete_data_index = extract_completed_data(&buf);
-            let mut new_leftovers: Vec<u8> =
-                Vec::with_capacity(max(0, count - non_complete_data_index));
-            new_leftovers.extend(&buf[non_complete_data_index..]);
 
             // send buffer to the queue to parse
             buf.truncate(non_complete_data_index);
-            let raw_data = RawData::new(leftovers.clone(), buf);
-            leftovers.clear();
-            leftovers.extend(new_leftovers);
+            let raw_data = RawData::new(buf.freeze());
             tx.send(raw_data).unwrap();
 
             counter += 1;
@@ -85,9 +74,9 @@ fn naive_implementastion() -> Result<(), Error> {
 
         let result = data_structures::prepare_result(output);
         print_result(&result, Box::new(io::stdout()));
+        println!("{}", counter);
     });
 
-    println!("{}", counter);
     Ok(())
 }
 
@@ -104,7 +93,7 @@ fn extract_completed_data(data: &[u8]) -> usize {
 
 #[derive(Clone)]
 struct TotalReading {
-    pub name: StationName,
+    pub name: Bytes,
     pub min_temp: i16,
     pub max_temp: i16,
     pub sum_temp: i64,
@@ -112,7 +101,7 @@ struct TotalReading {
 }
 
 impl TotalReading {
-    fn new(name: StationName, tmp_value: i16) -> Self {
+    fn new(name: Bytes, tmp_value: i16) -> Self {
         TotalReading {
             name,
             min_temp: tmp_value,
@@ -131,26 +120,24 @@ impl TotalReading {
 }
 
 struct RawData {
-    pub data_prefix: Vec<u8>,
-    data: Vec<u8>,
+    data: Bytes,
 }
 
 impl RawData {
-    fn new(data_prefix: Vec<u8>, data: Vec<u8>) -> Self {
-        RawData { data, data_prefix }
+    fn new(data: Bytes) -> Self {
+        RawData { data }
     }
 }
-
-#[derive(Eq, PartialEq, Hash, Clone, PartialOrd, Ord)]
-pub struct StationName(Vec<u8>);
 
 pub(crate) mod data_structures {
     use std::{
         cmp::{max, min},
-        collections::{BTreeMap, HashMap},
+        collections::HashMap,
     };
 
-    use crate::{to_temperature, RawData, StationName, TotalReading};
+    use bytes::{Buf, Bytes};
+
+    use crate::{to_temperature, TotalReading};
 
     pub(crate) struct DataHolder {
         data: SplitHashMap,
@@ -163,60 +150,29 @@ pub(crate) mod data_structures {
             }
         }
 
-        fn playground() {}
-
-        pub(crate) fn append(&mut self, raw_data: RawData) {
-            let mut start_index = 0;
-            let data = raw_data.data.as_slice();
-            if !raw_data.data_prefix.is_empty() {
-                let mut buffer = Vec::new();
-                buffer.extend(raw_data.data_prefix.iter().cloned());
-                for ele in data {
-                    start_index += 1;
-                    if *ele != b'\n' {
-                        buffer.push(*ele);
-                    } else {
-                        break;
-                    }
+        pub(crate) fn append(&mut self, mut raw_data: Bytes) {
+            loop {
+                if raw_data.is_empty() {
+                    break;
                 }
-                let delimeter_index = find_symbol(b';', &buffer);
-                let temperature = to_temperature(&buffer[(delimeter_index + 1)..]);
-                buffer.truncate(delimeter_index);
-                let name = StationName(buffer);
+                let index_delimeter = raw_data
+                    .iter()
+                    .position(|el| *el == b';')
+                    .expect("delimeter not found");
+                let name = raw_data.split_to(index_delimeter);
+                let _ = raw_data.split_to(1);
+
+                let index_new_line = raw_data
+                    .iter()
+                    .position(|el| *el == b'\n')
+                    .unwrap_or(raw_data.len());
+                let temperature_bytes = raw_data.split_to(index_new_line);
+                if !raw_data.is_empty() {
+                    let _ = raw_data.split_to(1);
+                }
+                let temperature = to_temperature(&temperature_bytes);
+
                 update_temperature(name, temperature, &mut self.data);
-            }
-
-            let mut left = 0;
-            let mut delimeter_index = 0;
-            for index in start_index..data.len() {
-                match data[index] {
-                    b';' => delimeter_index = index,
-                    b'\n' => {
-                        let name = StationName(data[left..delimeter_index].to_vec());
-                        let temperature = to_temperature(&data[(delimeter_index + 1)..index]);
-                        update_temperature(name, temperature, &mut self.data);
-                        left = index + 1;
-                    }
-                    _ => {}
-                };
-            }
-        }
-
-        pub(crate) fn append_1(&mut self, raw_data: &RawData) {
-            let mut buffer = Vec::from_iter(raw_data.data_prefix.iter().cloned());
-
-            for element in raw_data.data.as_slice() {
-                match element {
-                    0x0A => {
-                        let delimeter_index = find_symbol(b';', buffer.as_slice());
-                        let (name, value) = buffer.split_at(delimeter_index);
-                        let name = StationName(name.to_vec());
-                        let value = to_temperature(&value[1..]);
-                        update_temperature(name, value, &mut self.data);
-                        buffer.clear();
-                    }
-                    _ => buffer.push(*element),
-                };
             }
         }
 
@@ -226,7 +182,7 @@ pub(crate) mod data_structures {
     }
 
     struct SplitHashMap {
-        data: HashMap<u64, HashMap<StationName, TotalReading>>,
+        data: HashMap<Bytes, TotalReading>,
     }
 
     impl SplitHashMap {
@@ -236,61 +192,28 @@ pub(crate) mod data_structures {
             }
         }
 
-        pub(crate) fn get_mut(&mut self, name: &StationName) -> Option<&mut TotalReading> {
-            self.data
-                .get_mut(&get_first_symbol(name))
-                .map(|table| table.get_mut(name))?
+        pub(crate) fn get_mut(&mut self, name: &Bytes) -> Option<&mut TotalReading> {
+            self.data.get_mut(name)
         }
 
-        fn insert(&mut self, name: StationName, value: TotalReading) {
-            let first_symbol = get_first_symbol(&name);
-            match self.data.get_mut(&first_symbol) {
-                Some(table) => {
-                    let _ = table.insert(name, value);
-                }
-                None => {
-                    let mut table = HashMap::new();
-                    table.insert(name, value);
-                    let _ = self.data.insert(first_symbol, table);
-                }
-            };
+        fn insert(&mut self, name: Bytes, value: TotalReading) {
+            self.data.insert(name, value);
         }
 
         fn merge(&mut self, other: SplitHashMap) {
             for (key, value) in other.data.iter() {
-                let current_readings = match self.data.get_mut(key) {
-                    Some(reading) => reading,
+                match self.data.get_mut(key) {
+                    Some(reading) => reading.add(value),
                     None => {
-                        let table = HashMap::new();
-                        self.data.insert(*key, table);
-                        self.data.get_mut(key).unwrap()
+                        self.data.insert(value.name.clone(), value.clone());
                     }
                 };
-                for reading in value.values() {
-                    match current_readings.get_mut(&reading.name) {
-                        Some(current_reading) => current_reading.add(reading),
-                        None => {
-                            let _ = current_readings.insert(reading.name.clone(), reading.clone());
-                        }
-                    }
-                }
             }
         }
     }
 
-    fn get_first_symbol(name: &StationName) -> u64 {
-        name.0[0] as u64
-    }
-
     pub(crate) fn prepare_result(data: DataHolder) -> Vec<TotalReading> {
-        let mut result: Vec<TotalReading> = data
-            .data
-            .data
-            .values()
-            .flat_map(|map| map.values())
-            .cloned()
-            .collect();
-
+        let mut result: Vec<TotalReading> = data.data.data.into_values().collect();
         result.sort_by_key(|val| val.name.clone());
         result
     }
@@ -304,7 +227,7 @@ pub(crate) mod data_structures {
         panic!("element {} not found", symbol);
     }
 
-    fn update_temperature(name: StationName, value: i16, table: &mut SplitHashMap) {
+    fn update_temperature(name: Bytes, value: i16, table: &mut SplitHashMap) {
         match table.get_mut(&name) {
             Some(raw_value) => {
                 raw_value.min_temp = min(value, raw_value.min_temp);
@@ -348,7 +271,7 @@ fn print_result(readings: &Vec<TotalReading>, writer: Box<dyn Write>) {
     let mut buf_writer = BufWriter::new(writer);
     for reading in readings {
         let mean = (reading.sum_temp / (reading.temp_reading_count as i64)) as f64 / 10.0;
-        buf_writer.write_all(&reading.name.0).unwrap();
+        buf_writer.write_all(&reading.name).unwrap();
         buf_writer
             .write_fmt(format_args!(
                 ";{};{};{}\n",
