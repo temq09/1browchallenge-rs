@@ -43,7 +43,7 @@ fn naive_implementastion() -> Result<(), Error> {
             })
             .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
 
-        let file = File::open("/home/temq/prog/workspace/tmp/1bl/1b.txt").unwrap();
+        let file = File::open("/home/temq/prog/workspace/tmp/1bl/1m.txt").unwrap();
         let mut reder = BufReader::new(file);
         let mut counter = 0;
         loop {
@@ -135,7 +135,7 @@ pub(crate) mod data_structures {
         collections::HashMap,
     };
 
-    use bytes::{Buf, Bytes};
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
 
     use crate::{to_temperature, TotalReading};
 
@@ -218,15 +218,6 @@ pub(crate) mod data_structures {
         result
     }
 
-    fn find_symbol(symbol: u8, data: &[u8]) -> usize {
-        for element in (0..data.len()).rev() {
-            if data[element] == symbol {
-                return element;
-            }
-        }
-        panic!("element {} not found", symbol);
-    }
-
     fn update_temperature(name: Bytes, value: i16, table: &mut SplitHashMap) {
         match table.get_mut(&name) {
             Some(raw_value) => {
@@ -236,8 +227,11 @@ pub(crate) mod data_structures {
                 raw_value.temp_reading_count += 1;
             }
             None => {
-                let reading = TotalReading::new(name.clone(), value);
-                table.insert(name.to_owned(), reading);
+                let mut name_buf = BytesMut::zeroed(name.len());
+                name_buf.copy_from_slice(&name);
+                let new_name = name_buf.freeze();
+                let reading = TotalReading::new(new_name.clone(), value);
+                table.insert(new_name, reading);
             }
         }
     }
