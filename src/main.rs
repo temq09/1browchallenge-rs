@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use data_structures::DataHolder;
 
 fn main() {
@@ -23,7 +23,7 @@ fn naive_implementastion() -> Result<(), Error> {
         let (tx, rx) = mpsc::channel::<RawData>();
         let receiver = Arc::new(Mutex::new(rx));
 
-        let results = (0..7)
+        let results = (0..8)
             .map(|_| {
                 s.spawn({
                     let receiver = receiver.clone();
@@ -35,7 +35,8 @@ fn naive_implementastion() -> Result<(), Error> {
                                 break;
                             };
                             drop(guard);
-                            data_holder.append(raw_data.data);
+                            let bytes = Bytes::from(raw_data.data);
+                            data_holder.append(bytes);
                         }
                         data_holder
                     }
@@ -43,11 +44,11 @@ fn naive_implementastion() -> Result<(), Error> {
             })
             .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
 
-        let file = File::open("/home/temq/prog/workspace/tmp/1bl/1m.txt").unwrap();
+        let file = File::open("/home/temq/prog/workspace/tmp/1bl/1b.txt").unwrap();
         let mut reder = BufReader::new(file);
         let mut counter = 0;
         loop {
-            let mut buf = BytesMut::zeroed(1024 * 1000);
+            let mut buf = vec![0; 1024 * 1000];
             let count = reder.read(buf.as_mut()).unwrap();
             if count == 0 {
                 break;
@@ -56,7 +57,7 @@ fn naive_implementastion() -> Result<(), Error> {
 
             // send buffer to the queue to parse
             buf.truncate(non_complete_data_index);
-            let raw_data = RawData::new(buf.freeze());
+            let raw_data = RawData::new(buf);
             tx.send(raw_data).unwrap();
 
             counter += 1;
@@ -93,7 +94,6 @@ fn extract_completed_data(data: &[u8]) -> usize {
 
 #[derive(Clone)]
 struct TotalReading {
-    pub name: Bytes,
     pub min_temp: i16,
     pub max_temp: i16,
     pub sum_temp: i64,
@@ -101,9 +101,8 @@ struct TotalReading {
 }
 
 impl TotalReading {
-    fn new(name: Bytes, tmp_value: i16) -> Self {
+    fn new(tmp_value: i16) -> Self {
         TotalReading {
-            name,
             min_temp: tmp_value,
             max_temp: tmp_value,
             sum_temp: tmp_value as i64,
@@ -120,11 +119,11 @@ impl TotalReading {
 }
 
 struct RawData {
-    data: Bytes,
+    data: Vec<u8>,
 }
 
 impl RawData {
-    fn new(data: Bytes) -> Self {
+    fn new(data: Vec<u8>) -> Self {
         RawData { data }
     }
 }
@@ -135,7 +134,7 @@ pub(crate) mod data_structures {
         collections::HashMap,
     };
 
-    use bytes::{Buf, BufMut, Bytes, BytesMut};
+    use bytes::{Bytes, BytesMut};
 
     use crate::{to_temperature, TotalReading};
 
@@ -205,16 +204,16 @@ pub(crate) mod data_structures {
                 match self.data.get_mut(key) {
                     Some(reading) => reading.add(value),
                     None => {
-                        self.data.insert(value.name.clone(), value.clone());
+                        self.data.insert(key.clone(), value.clone());
                     }
                 };
             }
         }
     }
 
-    pub(crate) fn prepare_result(data: DataHolder) -> Vec<TotalReading> {
-        let mut result: Vec<TotalReading> = data.data.data.into_values().collect();
-        result.sort_by_key(|val| val.name.clone());
+    pub(crate) fn prepare_result(data: DataHolder) -> Vec<(Bytes, TotalReading)> {
+        let mut result: Vec<(Bytes, TotalReading)> = data.data.data.into_iter().collect();
+        result.sort_by_key(|val| val.0.clone());
         result
     }
 
@@ -230,7 +229,7 @@ pub(crate) mod data_structures {
                 let mut name_buf = BytesMut::zeroed(name.len());
                 name_buf.copy_from_slice(&name);
                 let new_name = name_buf.freeze();
-                let reading = TotalReading::new(new_name.clone(), value);
+                let reading = TotalReading::new(value);
                 table.insert(new_name, reading);
             }
         }
@@ -261,15 +260,17 @@ fn to_temperature(raw_data: &[u8]) -> i16 {
     temperature
 }
 
-fn print_result(readings: &Vec<TotalReading>, writer: Box<dyn Write>) {
+fn print_result(readings: &Vec<(Bytes, TotalReading)>, writer: Box<dyn Write>) {
     let mut buf_writer = BufWriter::new(writer);
-    for reading in readings {
+    for (name, reading) in readings {
         let mean = (reading.sum_temp / (reading.temp_reading_count as i64)) as f64 / 10.0;
-        buf_writer.write_all(&reading.name).unwrap();
+        buf_writer.write_all(&name).unwrap();
         buf_writer
             .write_fmt(format_args!(
                 ";{};{};{}\n",
-                reading.min_temp, mean, reading.max_temp
+                reading.min_temp / 10,
+                mean,
+                reading.max_temp / 10
             ))
             .unwrap();
     }
