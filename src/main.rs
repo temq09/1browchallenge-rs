@@ -47,9 +47,9 @@ fn naive_implementastion() -> Result<(), Error> {
         let mut reader = BufReader::new(file);
         let mut counter = 0;
         loop {
-            let mut buf = vec![0; 1024 * 1];
+            let mut buf = vec![0; 1024 * 100];
             let count = reader.read(buf.as_mut()).unwrap();
-            if count == 0 || counter > 20 {
+            if count == 0 {
                 break;
             }
             buf.truncate(count);
