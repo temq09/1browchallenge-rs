@@ -1,7 +1,7 @@
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{self, BufReader, BufWriter, Error, Read, Write},
+    io::{self, BufReader, BufWriter, Error, Read, Seek, Write},
     sync::{mpsc, Arc, Mutex},
     thread::{self, ScopedJoinHandle},
     time::Instant,
@@ -47,16 +47,20 @@ fn naive_implementastion() -> Result<(), Error> {
         let mut reader = BufReader::new(file);
         let mut counter = 0;
         loop {
-            let mut buf = vec![0; 1024 * 1000];
+            let mut buf = vec![0; 1024 * 1];
             let count = reader.read(buf.as_mut()).unwrap();
-            if count == 0 {
+            if count == 0 || counter > 20 {
                 break;
             }
-            let non_complete_data_index = extract_completed_data(&buf);
-            let _ = reader.seek_relative((count - 1 - non_complete_data_index) as i64);
+            buf.truncate(count);
 
-            // send buffer to the queue to parse
+            let non_complete_data_index = last_index_of(&buf, b'\n') + 1;
+            let offset = (count - non_complete_data_index) as i64;
+
+            let _ = reader.seek_relative(-offset);
+
             buf.truncate(non_complete_data_index);
+            // send buffer to the queue to parse
             let raw_data = RawData::new(buf);
             tx.send(raw_data).unwrap();
 
@@ -81,10 +85,10 @@ fn naive_implementastion() -> Result<(), Error> {
     Ok(())
 }
 
-fn extract_completed_data(data: &[u8]) -> usize {
+fn last_index_of(data: &[u8], symbol: u8) -> usize {
     let mut index = data.len() - 1;
     while index != 0 {
-        if data[index] == b'\n' {
+        if data[index] == symbol {
             break;
         }
         index -= 1;
@@ -131,25 +135,23 @@ impl RawData {
 pub(crate) mod data_structures {
     use std::{
         cmp::{max, min},
-        collections::HashMap,
         hash::Hasher,
-        u8,
     };
 
-    use rustc_hash::FxHasher;
+    use rustc_hash::{FxHashMap, FxHasher};
 
     use crate::{to_temperature, TotalReading};
 
     pub(crate) struct DataHolder {
         data: SplitHashMap,
-        names: HashMap<u64, Vec<u8>>,
+        names: FxHashMap<u64, Vec<u8>>,
     }
 
     impl DataHolder {
         pub(crate) fn new() -> Self {
             DataHolder {
                 data: SplitHashMap::new(),
-                names: HashMap::with_capacity(100),
+                names: FxHashMap::default(),
             }
         }
 
@@ -159,10 +161,6 @@ pub(crate) mod data_structures {
             for (index, element) in raw_data.iter().enumerate() {
                 match element {
                     b'\n' => {
-                        if index == 0 && middle == 0 {
-                            println!("empty line on {}", index);
-                            panic!("unexpected state");
-                        }
                         let temperature = to_temperature(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
@@ -180,13 +178,13 @@ pub(crate) mod data_structures {
     }
 
     struct SplitHashMap {
-        data: HashMap<u64, TotalReading>,
+        data: FxHashMap<u64, TotalReading>,
     }
 
     impl SplitHashMap {
         fn new() -> Self {
             SplitHashMap {
-                data: HashMap::new(),
+                data: FxHashMap::default(),
             }
         }
 
@@ -281,7 +279,7 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
     let mut buf_writer = BufWriter::new(writer);
     for (name, reading) in readings {
         let mean = (reading.sum_temp / (reading.temp_reading_count as i64)) as f64 / 10.0;
-        buf_writer.write_all(&name).unwrap();
+        buf_writer.write_all(name).unwrap();
         buf_writer
             .write_fmt(format_args!(
                 ";{};{};{}\n",
