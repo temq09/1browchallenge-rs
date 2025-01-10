@@ -1,8 +1,8 @@
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{self, BufReader, BufWriter, Error, Read, Seek, Write},
-    sync::{mpsc, Arc, Mutex},
+    io::{self, BufReader, BufWriter, Error, Read, Write},
+    sync::Mutex,
     thread::{self, ScopedJoinHandle},
     time::Instant,
 };
@@ -18,58 +18,39 @@ fn main() {
 }
 
 fn naive_implementastion() -> Result<(), Error> {
-    thread::scope(|s| {
-        let (tx, rx) = mpsc::channel::<RawData>();
-        let receiver = Arc::new(Mutex::new(rx));
+    let file = File::open("/home/temq/prog/workspace/tmp/1bl/1m.txt").unwrap();
+    let reader = BufReader::new(file);
+    let receiver = Mutex::new(reader);
 
+    thread::scope(|s| {
         let results = (0..8)
             .map(|_| {
-                s.spawn({
-                    let receiver = receiver.clone();
-                    move || {
-                        let mut data_holder = DataHolder::new();
-                        loop {
-                            let guard = receiver.lock().unwrap();
-                            let Ok(raw_data) = guard.recv() else {
-                                break;
-                            };
-                            drop(guard);
-                            data_holder.append(&raw_data.data);
-                            drop(raw_data);
+                s.spawn(|| {
+                    let mut data_holder = DataHolder::new();
+                    let mut buf = vec![0; 1024 * 1000];
+
+                    loop {
+                        let mut reader = receiver.lock().unwrap();
+
+                        let count = reader.read(buf.as_mut()).unwrap();
+
+                        if count == 0 {
+                            break;
                         }
-                        data_holder
+                        let buf = &buf[..count];
+                        let non_complete_data_index = last_index_of(buf, b'\n') + 1;
+                        let offset = (count - non_complete_data_index) as i64;
+
+                        let _ = reader.seek_relative(-offset);
+                        drop(reader);
+
+                        data_holder.append(&buf[..non_complete_data_index]);
                     }
+
+                    data_holder
                 })
             })
             .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
-
-        let file = File::open("/home/temq/prog/workspace/tmp/1bl/1m.txt").unwrap();
-        let mut reader = BufReader::new(file);
-        let mut counter = 0;
-        loop {
-            let mut buf = vec![0; 1024 * 100];
-            let count = reader.read(buf.as_mut()).unwrap();
-            if count == 0 {
-                break;
-            }
-            buf.truncate(count);
-
-            let non_complete_data_index = last_index_of(&buf, b'\n') + 1;
-            let offset = (count - non_complete_data_index) as i64;
-
-            let _ = reader.seek_relative(-offset);
-
-            buf.truncate(non_complete_data_index);
-            // send buffer to the queue to parse
-            let raw_data = RawData::new(buf);
-            tx.send(raw_data).unwrap();
-
-            counter += 1;
-        }
-
-        drop(tx);
-
-        println!("read complete, waiting for conumer to finish");
 
         let mut output = DataHolder::new();
         for handle in results {
@@ -79,7 +60,6 @@ fn naive_implementastion() -> Result<(), Error> {
 
         let result = data_structures::prepare_result(output);
         print_result(&result, Box::new(io::stdout()));
-        println!("Result: {}", counter);
     });
 
     Ok(())
