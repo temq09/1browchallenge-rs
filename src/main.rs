@@ -14,16 +14,18 @@ fn main() {
 
     naive_implementastion().unwrap();
 
-    println!("Execution time: {}", start.elapsed().as_millis());
+    println!("Total time: {}", start.elapsed().as_millis());
 }
 
 fn naive_implementastion() -> Result<(), Error> {
-    let file = File::open("/home/temq/prog/workspace/tmp/1bl/1m.txt").unwrap();
+    let file = File::open("/home/temq/prog/workspace/tmp/1bl/1b.txt").unwrap();
     let reader = BufReader::new(file);
     let receiver = Mutex::new(reader);
 
+    let start = Instant::now();
+
     thread::scope(|s| {
-        let results = (0..8)
+        let results = (0..10)
             .map(|_| {
                 s.spawn(|| {
                     let mut data_holder = DataHolder::new();
@@ -58,8 +60,12 @@ fn naive_implementastion() -> Result<(), Error> {
             output.merge(result);
         }
 
+        let execution_time = start.elapsed().as_millis();
+
         let result = data_structures::prepare_result(output);
         print_result(&result, Box::new(io::stdout()));
+
+        println!("Execution time {} milliseconds", execution_time);
     });
 
     Ok(())
@@ -237,20 +243,18 @@ fn to_temperature(raw_data: &[u8]) -> i16 {
     let mut temperature = 0;
     let mut position = 0;
 
-    for index in (0..raw_data.len()).rev() {
-        let symbol = raw_data[index];
+    let mut index = raw_data.len() - 1;
+    temperature += (raw_data[index] - 48) as i16 * MULTIPLIYERS[position];
+    index -= 2;
+    position += 1;
+    temperature += (raw_data[index] - 48) as i16 * MULTIPLIYERS[position];
+    (0..index).for_each(|leftover_index| {
+        let symbol = raw_data[leftover_index];
         match symbol {
-            b'0'..=b'9' => {
-                temperature += (symbol - 48) as i16 * MULTIPLIYERS[position];
-                position += 1;
-            }
-            b'-' => {
-                temperature *= -1;
-            }
-            b'.' => continue,
-            _ => panic!("Unexpected symbol: {}", symbol as char),
+            b'-' => temperature *= -1,
+            _ => temperature += (symbol - 48) as i16 * MULTIPLIYERS[position],
         }
-    }
+    });
 
     temperature
 }
