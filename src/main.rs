@@ -18,14 +18,16 @@ fn main() {
 }
 
 fn naive_implementastion() -> Result<(), Error> {
-    let file = File::open("/home/temq/prog/workspace/tmp/1bl/1b.txt").unwrap();
+    let file = File::open("/Users/artemushakov/prog/tmp/1binput/1b.txt").unwrap();
     let reader = BufReader::new(file);
     let receiver = Mutex::new(reader);
 
     let start = Instant::now();
 
+    let thread_amount = std::thread::available_parallelism().unwrap().get();
+    println!("Parallelism {}", thread_amount);
     thread::scope(|s| {
-        let results = (0..10)
+        let results = (0..thread_amount)
             .map(|_| {
                 s.spawn(|| {
                     let mut data_holder = DataHolder::new();
@@ -105,16 +107,6 @@ impl TotalReading {
         self.min_temp = min(self.min_temp, other.max_temp);
         self.sum_temp += other.sum_temp;
         self.temp_reading_count += other.temp_reading_count;
-    }
-}
-
-struct RawData {
-    data: Vec<u8>,
-}
-
-impl RawData {
-    fn new(data: Vec<u8>) -> Self {
-        RawData { data }
     }
 }
 
