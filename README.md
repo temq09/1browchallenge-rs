@@ -1,4 +1,4 @@
-Rust implementation for (one billion challenge)[https://github.com/gunnarmorling/1brc].
+Rust implementation for [one billion challenge](https://github.com/gunnarmorling/1brc).
 The main focus for the implementation is to have fast but simple and readable implementation.
 
 ## Overview
@@ -8,3 +8,9 @@ Each thread tries to read a chunk from the same file descriptor. The thread lock
 
 Temperature is stored as float, so to make math operations faster temperature is parsed as int and divided by 100 during data output.
 
+## How to run
+
+To run use
+```shell
+cargo run -r
+```
