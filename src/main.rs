@@ -233,18 +233,15 @@ static MULTIPLIYERS: [i16; 3] = [1, 10, 100];
 
 fn to_temperature(raw_data: &[u8]) -> i16 {
     let mut temperature = 0;
-    let mut position = 0;
 
-    let mut index = raw_data.len() - 1;
-    temperature += (raw_data[index] - 48) as i16 * MULTIPLIYERS[position];
-    index -= 2;
-    position += 1;
-    temperature += (raw_data[index] - 48) as i16 * MULTIPLIYERS[position];
-    (0..index).for_each(|leftover_index| {
+    let index = raw_data.len() - 1;
+    temperature += (raw_data[index] - 48) as i16 * MULTIPLIYERS[0];
+    temperature += (raw_data[index - 2] - 48) as i16 * MULTIPLIYERS[1];
+    (0..(index - 2)).rev().for_each(|leftover_index| {
         let symbol = raw_data[leftover_index];
         match symbol {
             b'-' => temperature *= -1,
-            _ => temperature += (symbol - 48) as i16 * MULTIPLIYERS[position],
+            _ => temperature += (symbol - 48) as i16 * MULTIPLIYERS[2],
         }
     });
 
@@ -264,5 +261,18 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
                 reading.max_temp / 10
             ))
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::to_temperature;
+
+    #[test]
+    fn test_to_temperature() {
+        assert_eq!(to_temperature(b"12.0"), 120);
+        assert_eq!(to_temperature(b"-12.0"), -120);
+        assert_eq!(to_temperature(b"1.1"), 11);
+        assert_eq!(to_temperature(b"-1.1"), -11);
     }
 }
