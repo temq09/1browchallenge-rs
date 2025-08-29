@@ -1,7 +1,7 @@
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{self, BufReader, BufWriter, Error, Read, Write},
+    io::{BufReader, BufWriter, Error, Read, Write},
     sync::Mutex,
     thread::{self, ScopedJoinHandle},
     time::Instant,
@@ -62,11 +62,10 @@ fn naive_implementastion() -> Result<(), Error> {
             output.merge(result);
         }
 
-        let execution_time = start.elapsed().as_millis();
-
         let result = data_structures::prepare_result(output);
-        print_result(&result, Box::new(io::stdout()));
+        // print_result(&result, Box::new(io::stdout()));
 
+        let execution_time = start.elapsed().as_millis();
         println!("Execution time {} milliseconds", execution_time);
     });
 
@@ -136,15 +135,23 @@ pub(crate) mod data_structures {
         pub(crate) fn append(&mut self, raw_data: &[u8]) {
             let mut start = 0;
             let mut middle = 0;
-            for (index, element) in raw_data.iter().enumerate() {
+            let mut index = 0;
+            while index < raw_data.len() {
+                let element = raw_data[index];
                 match element {
                     b'\n' => {
                         let temperature = to_temperature(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
+                        index += 2; // name takes at least one byte so jump straight to the next
+                                    // one
                     }
-                    b';' => middle = index,
-                    _ => {}
+                    b';' => {
+                        middle = index;
+                        index += 4; // temperature takes at least 3 bytes, so just straight to 4th
+                                    // byte
+                    }
+                    _ => index += 1,
                 }
             }
         }
