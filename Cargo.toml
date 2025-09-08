@@ -8,3 +8,4 @@ rustc-hash = "2.1.0"
 
 [profile.release]
 debug = true
+opt-level = 3

@@ -1,7 +1,7 @@
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{BufReader, BufWriter, Error, Read, Write},
+    io::{self, BufReader, BufWriter, Error, Read, Write},
     sync::Mutex,
     thread::{self, ScopedJoinHandle},
     time::Instant,
@@ -63,7 +63,7 @@ fn naive_implementastion() -> Result<(), Error> {
         }
 
         let result = data_structures::prepare_result(output);
-        // print_result(&result, Box::new(io::stdout()));
+        //print_result(&result, Box::new(io::stdout()));
 
         let execution_time = start.elapsed().as_millis();
         println!("Execution time {} milliseconds", execution_time);
@@ -117,7 +117,7 @@ pub(crate) mod data_structures {
 
     use rustc_hash::{FxHashMap, FxHasher};
 
-    use crate::{to_temperature, TotalReading};
+    use crate::{to_temperature, to_temperature_manual_access, TotalReading};
 
     pub(crate) struct DataHolder {
         data: SplitHashMap,
@@ -140,7 +140,8 @@ pub(crate) mod data_structures {
                 let element = raw_data[index];
                 match element {
                     b'\n' => {
-                        let temperature = to_temperature(&raw_data[(middle + 1)..index]);
+                        let temperature =
+                            to_temperature_manual_access(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
                         index += 2; // name takes at least one byte so jump straight to the next
@@ -255,6 +256,24 @@ fn to_temperature(raw_data: &[u8]) -> i16 {
     temperature
 }
 
+fn to_temperature_manual_access(raw_data: &[u8]) -> i16 {
+    // a version of the parsing which is more likely to be optimized to SIMD instructions
+    let mut mul = 1;
+    let data = if raw_data[0] == b'-' {
+        mul = -1;
+        &raw_data[1..]
+    } else {
+        raw_data
+    };
+
+    let res = if data.len() == 4 {
+        (data[0] - 48) as i16 * 100 + (data[1] - 48) as i16 * 10 + (data[3] - 48) as i16
+    } else {
+        (data[0] - 48) as i16 * 10 + (data[2] - 48) as i16
+    };
+    res * mul
+}
+
 fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>) {
     let mut buf_writer = BufWriter::new(writer);
     for (name, reading) in readings {
@@ -273,7 +292,7 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
 
 #[cfg(test)]
 mod test {
-    use crate::to_temperature;
+    use crate::{to_temperature, to_temperature_manual_access};
 
     #[test]
     fn test_to_temperature() {
@@ -281,5 +300,13 @@ mod test {
         assert_eq!(to_temperature(b"-12.0"), -120);
         assert_eq!(to_temperature(b"1.1"), 11);
         assert_eq!(to_temperature(b"-1.1"), -11);
+    }
+
+    #[test]
+    fn test_to_temperature_1() {
+        assert_eq!(to_temperature_manual_access(b"12.0"), 120);
+        assert_eq!(to_temperature_manual_access(b"-12.0"), -120);
+        assert_eq!(to_temperature_manual_access(b"1.1"), 11);
+        assert_eq!(to_temperature_manual_access(b"-1.1"), -11);
     }
 }
