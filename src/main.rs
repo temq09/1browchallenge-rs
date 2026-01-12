@@ -1,28 +1,21 @@
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{self, BufReader, BufWriter, Error, Read, Write},
+    io::{BufReader, BufWriter, Error, Read, Write},
     sync::Mutex,
     thread::{self, ScopedJoinHandle},
-    time::Instant,
 };
 
 use data_structures::DataHolder;
 
 fn main() {
-    let start = Instant::now();
-
     naive_implementastion().unwrap();
-
-    println!("Total time: {}", start.elapsed().as_millis());
 }
 
 fn naive_implementastion() -> Result<(), Error> {
-    let file = File::open("/Users/artemushakov/prog/tmp/1binput/1b.txt").unwrap();
+    let file = File::open("/home/temq/100m.txt").unwrap();
     let reader = BufReader::new(file);
     let receiver = Mutex::new(reader);
-
-    let start = Instant::now();
 
     let thread_amount = std::thread::available_parallelism().unwrap().get();
     println!("Parallelism {}", thread_amount);
@@ -64,9 +57,6 @@ fn naive_implementastion() -> Result<(), Error> {
 
         let result = data_structures::prepare_result(output);
         //print_result(&result, Box::new(io::stdout()));
-
-        let execution_time = start.elapsed().as_millis();
-        println!("Execution time {} milliseconds", execution_time);
     });
 
     Ok(())
@@ -117,7 +107,7 @@ pub(crate) mod data_structures {
 
     use rustc_hash::{FxHashMap, FxHasher};
 
-    use crate::{to_temperature, to_temperature_manual_access, TotalReading};
+    use crate::{to_temperature_manual_access, TotalReading};
 
     pub(crate) struct DataHolder {
         data: SplitHashMap,
