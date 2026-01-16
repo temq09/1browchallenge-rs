@@ -1,9 +1,14 @@
+#![feature(test)]
+#![feature(portable_simd)]
+use core::simd;
 use std::{
     cmp::{max, min},
     fs::File,
     io::{BufReader, BufWriter, Error, Read, Write},
+    simd::{cmp::SimdPartialEq, u8x8},
     sync::Mutex,
     thread::{self, ScopedJoinHandle},
+    time::Duration,
 };
 
 use data_structures::DataHolder;
@@ -102,12 +107,13 @@ impl TotalReading {
 pub(crate) mod data_structures {
     use std::{
         cmp::{max, min},
-        hash::Hasher,
+        collections::HashMap,
+        hash::{BuildHasher, Hasher},
     };
 
     use rustc_hash::{FxHashMap, FxHasher};
 
-    use crate::{to_temperature_manual_access, TotalReading};
+    use crate::{to_temperature_simd, TotalReading};
 
     pub(crate) struct DataHolder {
         data: SplitHashMap,
@@ -131,7 +137,9 @@ pub(crate) mod data_structures {
                 match element {
                     b'\n' => {
                         let temperature =
-                            to_temperature_manual_access(&raw_data[(middle + 1)..index]);
+                            //to_temperature_manual_access(&raw_data[(middle + 1)..index]);
+                        to_temperature_simd(&raw_data[(middle + 1)..index]);
+                        //let temperature = to_temperatur_simd(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
                         index += 2; // name takes at least one byte so jump straight to the next
@@ -153,14 +161,40 @@ pub(crate) mod data_structures {
         }
     }
 
+    struct Fnv1aHash(u64);
+    struct Fnv1aHashBuilder;
+
+    impl BuildHasher for Fnv1aHashBuilder {
+        type Hasher = Fnv1aHash;
+
+        fn build_hasher(&self) -> Self::Hasher {
+            Fnv1aHash(0xcbf29ce484222325)
+        }
+    }
+
+    impl Hasher for Fnv1aHash {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+
+        #[inline(never)]
+        fn write(&mut self, bytes: &[u8]) {
+            for el in bytes {
+                self.0 ^= (*el) as u64;
+                self.0 *= 0x00000100000001b3;
+            }
+        }
+    }
+
     struct SplitHashMap {
-        data: FxHashMap<u64, TotalReading>,
+        data: HashMap<u64, TotalReading, Fnv1aHashBuilder>,
     }
 
     impl SplitHashMap {
         fn new() -> Self {
+            let hasher = Fnv1aHashBuilder {};
             SplitHashMap {
-                data: FxHashMap::default(),
+                data: HashMap::with_capacity_and_hasher(15000, hasher),
             }
         }
 
@@ -264,6 +298,27 @@ fn to_temperature_manual_access(raw_data: &[u8]) -> i16 {
     res * mul
 }
 
+fn to_temperature_simd(raw_data: &[u8]) -> i16 {
+    let sign = if raw_data[0] == b'-' { -1 } else { 1 };
+    let mut data = [0; 8];
+    let zeros = u8x8::splat(0);
+    let start_index = 8 - raw_data.len();
+    data[start_index..].copy_from_slice(raw_data);
+    let mut data = simd::u8x8::from_array(data);
+    // covert - to 0
+    let mut mask = data.simd_ne(u8x8::splat(b'-'));
+    data = mask.select(data, zeros);
+    // storing mask of non zero values to select them for correction later
+    mask = data.simd_ne(zeros);
+    // utf8 character to integer convertion
+    data -= u8x8::splat(48);
+
+    // after the convertion only the items that were non zero should be selected
+    data = mask.select(data, zeros);
+    data *= simd::u8x8::from_array([0, 0, 0, 0, 100, 10, 0, 1]);
+    data.as_array().iter().map(|&el| el as i16).sum::<i16>() * sign
+}
+
 fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>) {
     let mut buf_writer = BufWriter::new(writer);
     for (name, reading) in readings {
@@ -282,7 +337,8 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
 
 #[cfg(test)]
 mod test {
-    use crate::{to_temperature, to_temperature_manual_access};
+    use crate::{to_temperature, to_temperature_manual_access, to_temperature_simd};
+    extern crate test;
 
     #[test]
     fn test_to_temperature() {
@@ -298,5 +354,28 @@ mod test {
         assert_eq!(to_temperature_manual_access(b"-12.0"), -120);
         assert_eq!(to_temperature_manual_access(b"1.1"), 11);
         assert_eq!(to_temperature_manual_access(b"-1.1"), -11);
+    }
+
+    #[test]
+    fn test_to_temperature_simd() {
+        assert_eq!(to_temperature_simd(b"1.1"), 11);
+        assert_eq!(to_temperature_simd(b"12.0"), 120);
+        assert_eq!(to_temperature_simd(b"-12.0"), -120);
+        assert_eq!(to_temperature_simd(b"-1.1"), -11);
+    }
+
+    #[bench]
+    fn bench_temperature_simd(b: &mut test::Bencher) {
+        b.iter(|| test::black_box(to_temperature_simd(b"-12.0")));
+    }
+
+    #[bench]
+    fn bench_temperature(b: &mut test::Bencher) {
+        b.iter(|| test::black_box(to_temperature(b"-12.0")));
+    }
+
+    #[bench]
+    fn bench_temperature_manual(b: &mut test::Bencher) {
+        b.iter(|| test::black_box(to_temperature_manual_access(b"-12.3")));
     }
 }
