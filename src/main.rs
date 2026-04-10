@@ -77,23 +77,25 @@ fn single_thread_reader(file: File) -> Result<(), Error> {
 }
 
 fn read_and_send(reader: &mut BufReader<File>, tx: &Sender<Vec<u8>>) -> bool {
-    let chunk_size = 64 * 1024;
+    let chunk_size = 1 * 1024;
     let mut data: Vec<u8> = vec![0; chunk_size];
-    let first_read = reader.read(&mut data).unwrap();
-    if first_read == 0 {
+    let bytes_read = reader.read(&mut data).unwrap();
+    println!("Read {bytes_read}");
+    if bytes_read == 0 {
         return false;
     }
-    let mut diff = 0;
-    for i in (0..first_read).rev() {
-        if data[i] == b'\n' {
-            break;
-        }
-        diff += 1;
-    }
-    data.shrink_to(first_read - diff - 1);
+    let (shrink_to, seek_back) = get_indicies(&data[..bytes_read]);
+    data.truncate(shrink_to);
     tx.try_send(data).unwrap();
-    reader.seek_relative(-(diff as i64)).unwrap();
+    reader.seek_relative(-seek_back + 2).unwrap();
     true
+}
+
+fn get_indicies(data: &[u8]) -> (usize, i64) {
+    match data.iter().rposition(|char| *char == b'\n') {
+        Some(pos) => (pos, (data.len() - pos) as i64),
+        None => (0, data.len() as i64),
+    }
 }
 
 fn read_blocking(rx: Receiver<Vec<u8>>) -> DataHolder {
@@ -128,10 +130,8 @@ fn naive_implementastion(file: File) -> Result<(), Error> {
                             break;
                         }
                         let buf = &buf[..count];
-                        let non_complete_data_index = last_index_of(buf, b'\n') + 1;
-                        let offset = (count - non_complete_data_index) as i64;
-
-                        let _ = reader.seek_relative(-offset);
+                        let (non_complete_data_index, seek_to) = get_indicies(buf);
+                        let _ = reader.seek_relative(-seek_to);
                         drop(reader);
 
                         data_holder.append(&buf[..non_complete_data_index]);
@@ -148,21 +148,10 @@ fn naive_implementastion(file: File) -> Result<(), Error> {
             output.merge(result);
         }
 
-        let result = data_structures::prepare_result(output);
+        let _result = data_structures::prepare_result(output);
     });
 
     Ok(())
-}
-
-fn last_index_of(data: &[u8], symbol: u8) -> usize {
-    let mut index = data.len() - 1;
-    while index != 0 {
-        if data[index] == symbol {
-            break;
-        }
-        index -= 1;
-    }
-    index
 }
 
 #[derive(Clone)]
@@ -199,7 +188,7 @@ pub(crate) mod data_structures {
 
     use rustc_hash::{FxHashMap, FxHasher};
 
-    use crate::{TotalReading, to_temperature_manual};
+    use crate::{TotalReading, to_temperature, to_temperature_manual};
 
     pub(crate) struct DataHolder {
         data: SplitHashMap,
@@ -215,24 +204,26 @@ pub(crate) mod data_structures {
         }
 
         pub(crate) fn append(&mut self, raw_data: &[u8]) {
-            self.append_manual_optimization(raw_data);
-            //self.append_no_optimization(raw_data);
+            //self.append_manual_optimization(raw_data);
+            self.append_no_optimization(raw_data);
         }
 
         fn append_no_optimization(&mut self, raw_data: &[u8]) {
+            if raw_data.is_empty() {
+                return;
+            }
             for line in raw_data.split(|byte| byte == &b'\n') {
                 let mut iter = line.split(|char| char == &b';');
-                let name = iter.next().unwrap();
+                let name = iter.next().expect("Name to be available");
                 let temp = iter.next();
-                if let None = temp {
-                    let cl = String::from_utf8(line.to_vec()).unwrap();
-                    println!("Can't find ; for {cl}");
+                if temp.is_none() {
                     continue;
                 }
                 update_temperature(name, to_temperature_manual(temp.unwrap()), self);
             }
         }
 
+        #[inline(never)]
         fn append_manual_optimization(&mut self, raw_data: &[u8]) {
             let mut start = 0;
             let mut middle = 0;
@@ -241,7 +232,7 @@ pub(crate) mod data_structures {
                 let element = raw_data[index];
                 match element {
                     b'\n' => {
-                        let temperature = to_temperature_manual(&raw_data[(middle + 1)..index]);
+                        let temperature = to_temperature(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
                         index += 2; // name takes at least one byte so jump straight to the next one
@@ -277,7 +268,6 @@ pub(crate) mod data_structures {
             self.0
         }
 
-        #[inline(never)]
         fn write(&mut self, bytes: &[u8]) {
             for el in bytes {
                 self.0 ^= (*el) as u64;
@@ -340,11 +330,8 @@ pub(crate) mod data_structures {
         let hash = get_hash(name);
         match table.get_mut(&hash) {
             Some(raw_value) => {
-                if raw_value.min_temp > value {
-                    raw_value.min_temp = value
-                } else if raw_value.max_temp < value {
-                    raw_value.max_temp = value
-                }
+                raw_value.min_temp = raw_value.min_temp.min(value);
+                raw_value.max_temp = raw_value.max_temp.max(value);
                 raw_value.sum_temp += value as i64;
                 raw_value.temp_reading_count += 1;
             }
@@ -384,6 +371,7 @@ fn to_temperature(raw_data: &[u8]) -> i16 {
     temperature
 }
 
+#[inline(never)]
 pub fn to_temperature_manual(raw_data: &[u8]) -> i16 {
     let mut mul = 1;
     let data = if raw_data[0] == b'-' {
@@ -442,7 +430,7 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
 mod test {
     use std::io::{BufRead, Read};
 
-    use crate::{to_temperature, to_temperature_manual, to_temperature_simd};
+    use crate::{get_indicies, to_temperature, to_temperature_manual, to_temperature_simd};
     extern crate test;
 
     #[test]
@@ -478,6 +466,14 @@ mod test {
         assert_eq!(to_temperature_simd(b"12.0"), 120);
         assert_eq!(to_temperature_simd(b"-12.0"), -120);
         assert_eq!(to_temperature_simd(b"-1.1"), -11);
+    }
+
+    #[test]
+    fn test_get_indicies() {
+        assert_eq!(get_indicies("aaaaa\nbbb".as_bytes()), (5, 3));
+        assert_eq!(get_indicies("aaaaaaa\nbbb".as_bytes()), (7, 3));
+        assert_eq!(get_indicies("aaaaaaa\n".as_bytes()), (7, 0));
+        assert_eq!(get_indicies("aaaaaaa".as_bytes()), (0, 7));
     }
 
     #[bench]
