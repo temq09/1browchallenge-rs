@@ -4,21 +4,109 @@ use core::simd;
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{BufReader, BufWriter, Error, Read, Write},
-    simd::{cmp::SimdPartialEq, u8x8},
+    io::{self, BufReader, BufWriter, Error, Read, Write},
+    path::PathBuf,
+    simd::{Select, cmp::SimdPartialEq, u8x8},
     sync::Mutex,
     thread::{self, ScopedJoinHandle},
-    time::Duration,
 };
 
+use clap::{Parser, ValueEnum};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use data_structures::DataHolder;
 
-fn main() {
-    naive_implementastion().unwrap();
+#[derive(Clone, Copy, ValueEnum, Debug)]
+enum Mode {
+    Default,
+    ReadSingle,
 }
 
-fn naive_implementastion() -> Result<(), Error> {
-    let file = File::open("/home/temq/100m.txt").unwrap();
+#[derive(Parser, Debug)]
+struct Args {
+    /// The operation mode
+    #[arg(short, long)]
+    mode: Option<Mode>,
+
+    /// Path to the input file
+    #[arg(short, long)]
+    input: PathBuf,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    let file = File::open(args.input).unwrap();
+    let _ = match args.mode.unwrap_or(Mode::Default) {
+        Mode::Default => naive_implementastion(file),
+        Mode::ReadSingle => single_thread_reader(file),
+    };
+}
+
+fn single_thread_reader(file: File) -> Result<(), Error> {
+    let thread_amount = std::thread::available_parallelism().unwrap().get();
+    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = unbounded();
+    println!("Parallelism {thread_amount}");
+    let read_thread_rx = rx.clone();
+    thread::scope(|s| {
+        let read_task = s.spawn(move || {
+            let mut reader = BufReader::new(file);
+            while read_and_send(&mut reader, &tx) {}
+            drop(tx);
+
+            read_blocking(read_thread_rx)
+        });
+
+        let results = (0..(thread_amount - 1))
+            .map(|_| {
+                let local_rx = rx.clone();
+                s.spawn(move || read_blocking(local_rx))
+            })
+            .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
+
+        let mut output = read_task.join().unwrap();
+        for handle in results {
+            let result = handle.join().unwrap();
+            output.merge(result);
+        }
+
+        let result = data_structures::prepare_result(output);
+        print_result(&result, Box::new(io::stdout()));
+    });
+
+    Ok(())
+}
+
+fn read_and_send(reader: &mut BufReader<File>, tx: &Sender<Vec<u8>>) -> bool {
+    let chunk_size = 64 * 1024;
+    let mut data: Vec<u8> = vec![0; chunk_size];
+    let first_read = reader.read(&mut data).unwrap();
+    if first_read == 0 {
+        return false;
+    }
+    let mut diff = 0;
+    for i in (0..first_read).rev() {
+        if data[i] == b'\n' {
+            break;
+        }
+        diff += 1;
+    }
+    data.shrink_to(first_read - diff - 1);
+    tx.try_send(data).unwrap();
+    reader.seek_relative(-(diff as i64)).unwrap();
+    true
+}
+
+fn read_blocking(rx: Receiver<Vec<u8>>) -> DataHolder {
+    let mut global_data_holder = DataHolder::new();
+
+    while let Ok(data) = rx.recv() {
+        global_data_holder.append(&data);
+    }
+
+    global_data_holder
+}
+
+fn naive_implementastion(file: File) -> Result<(), Error> {
     let reader = BufReader::new(file);
     let receiver = Mutex::new(reader);
 
@@ -29,7 +117,7 @@ fn naive_implementastion() -> Result<(), Error> {
             .map(|_| {
                 s.spawn(|| {
                     let mut data_holder = DataHolder::new();
-                    let mut buf = vec![0; 1024 * 1000];
+                    let mut buf = vec![0; 64 * 1024];
 
                     loop {
                         let mut reader = receiver.lock().unwrap();
@@ -61,7 +149,6 @@ fn naive_implementastion() -> Result<(), Error> {
         }
 
         let result = data_structures::prepare_result(output);
-        //print_result(&result, Box::new(io::stdout()));
     });
 
     Ok(())
@@ -106,14 +193,13 @@ impl TotalReading {
 
 pub(crate) mod data_structures {
     use std::{
-        cmp::{max, min},
         collections::HashMap,
         hash::{BuildHasher, Hasher},
     };
 
     use rustc_hash::{FxHashMap, FxHasher};
 
-    use crate::{to_temperature_simd, TotalReading};
+    use crate::{TotalReading, to_temperature_manual};
 
     pub(crate) struct DataHolder {
         data: SplitHashMap,
@@ -129,6 +215,25 @@ pub(crate) mod data_structures {
         }
 
         pub(crate) fn append(&mut self, raw_data: &[u8]) {
+            self.append_manual_optimization(raw_data);
+            //self.append_no_optimization(raw_data);
+        }
+
+        fn append_no_optimization(&mut self, raw_data: &[u8]) {
+            for line in raw_data.split(|byte| byte == &b'\n') {
+                let mut iter = line.split(|char| char == &b';');
+                let name = iter.next().unwrap();
+                let temp = iter.next();
+                if let None = temp {
+                    let cl = String::from_utf8(line.to_vec()).unwrap();
+                    println!("Can't find ; for {cl}");
+                    continue;
+                }
+                update_temperature(name, to_temperature_manual(temp.unwrap()), self);
+            }
+        }
+
+        fn append_manual_optimization(&mut self, raw_data: &[u8]) {
             let mut start = 0;
             let mut middle = 0;
             let mut index = 0;
@@ -136,19 +241,14 @@ pub(crate) mod data_structures {
                 let element = raw_data[index];
                 match element {
                     b'\n' => {
-                        let temperature =
-                            //to_temperature_manual_access(&raw_data[(middle + 1)..index]);
-                        to_temperature_simd(&raw_data[(middle + 1)..index]);
-                        //let temperature = to_temperatur_simd(&raw_data[(middle + 1)..index]);
+                        let temperature = to_temperature_manual(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
-                        index += 2; // name takes at least one byte so jump straight to the next
-                                    // one
+                        index += 2; // name takes at least one byte so jump straight to the next one
                     }
                     b';' => {
                         middle = index;
-                        index += 4; // temperature takes at least 3 bytes, so just straight to 4th
-                                    // byte
+                        index += 4; // temperature takes at least 3 bytes, so just straight to 4th byte
                     }
                     _ => index += 1,
                 }
@@ -236,12 +336,15 @@ pub(crate) mod data_structures {
     }
 
     fn update_temperature(name: &[u8], value: i16, data_holder: &mut DataHolder) {
-        let hash = get_hash(name);
         let table = &mut data_holder.data;
+        let hash = get_hash(name);
         match table.get_mut(&hash) {
             Some(raw_value) => {
-                raw_value.min_temp = min(value, raw_value.min_temp);
-                raw_value.max_temp = max(value, raw_value.max_temp);
+                if raw_value.min_temp > value {
+                    raw_value.min_temp = value
+                } else if raw_value.max_temp < value {
+                    raw_value.max_temp = value
+                }
                 raw_value.sum_temp += value as i64;
                 raw_value.temp_reading_count += 1;
             }
@@ -266,6 +369,7 @@ static MULTIPLIYERS: [i16; 3] = [1, 10, 100];
 fn to_temperature(raw_data: &[u8]) -> i16 {
     let mut temperature = 0;
 
+    //let _ = raw_data[0];
     let index = raw_data.len() - 1;
     temperature += (raw_data[index] - 48) as i16 * MULTIPLIYERS[0];
     temperature += (raw_data[index - 2] - 48) as i16 * MULTIPLIYERS[1];
@@ -280,8 +384,7 @@ fn to_temperature(raw_data: &[u8]) -> i16 {
     temperature
 }
 
-fn to_temperature_manual_access(raw_data: &[u8]) -> i16 {
-    // a version of the parsing which is more likely to be optimized to SIMD instructions
+pub fn to_temperature_manual(raw_data: &[u8]) -> i16 {
     let mut mul = 1;
     let data = if raw_data[0] == b'-' {
         mul = -1;
@@ -337,7 +440,9 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
 
 #[cfg(test)]
 mod test {
-    use crate::{to_temperature, to_temperature_manual_access, to_temperature_simd};
+    use std::io::{BufRead, Read};
+
+    use crate::{to_temperature, to_temperature_manual, to_temperature_simd};
     extern crate test;
 
     #[test]
@@ -350,10 +455,21 @@ mod test {
 
     #[test]
     fn test_to_temperature_1() {
-        assert_eq!(to_temperature_manual_access(b"12.0"), 120);
-        assert_eq!(to_temperature_manual_access(b"-12.0"), -120);
-        assert_eq!(to_temperature_manual_access(b"1.1"), 11);
-        assert_eq!(to_temperature_manual_access(b"-1.1"), -11);
+        assert_eq!(to_temperature_manual(b"12.0"), 120);
+        assert_eq!(to_temperature_manual(b"-12.0"), -120);
+        assert_eq!(to_temperature_manual(b"1.1"), 11);
+        assert_eq!(to_temperature_manual(b"-1.1"), -11);
+    }
+
+    #[test]
+    fn test_read() {
+        let mut input = "This is very very + long string with some text in it".as_bytes();
+        let mut output: Vec<u8> = vec![0; 20];
+        let first = input.read(&mut output[..10]).unwrap();
+        output.truncate(first);
+        let second = input.read_until(b'+', &mut output).unwrap();
+        output.shrink_to(first + second);
+        assert_eq!(output, "This is very very +".to_string().into_bytes());
     }
 
     #[test]
@@ -376,6 +492,6 @@ mod test {
 
     #[bench]
     fn bench_temperature_manual(b: &mut test::Bencher) {
-        b.iter(|| test::black_box(to_temperature_manual_access(b"-12.3")));
+        b.iter(|| test::black_box(to_temperature_manual(b"-12.3")));
     }
 }
