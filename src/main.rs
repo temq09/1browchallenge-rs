@@ -183,7 +183,7 @@ impl TotalReading {
 
     fn add(&mut self, other: &TotalReading) {
         self.max_temp = max(self.max_temp, other.max_temp);
-        self.min_temp = min(self.min_temp, other.max_temp);
+        self.min_temp = min(self.min_temp, other.min_temp);
         self.sum_temp += other.sum_temp;
         self.temp_reading_count += other.temp_reading_count;
     }
@@ -247,10 +247,7 @@ pub(crate) mod data_structures {
             for (key, val) in data.data {
                 match self.data.get_mut(&key) {
                     Some(current) => {
-                        current.min_temp = current.min_temp.min(val.min_temp);
-                        current.max_temp = current.max_temp.max(val.max_temp);
-                        current.sum_temp += val.sum_temp;
-                        current.temp_reading_count += val.temp_reading_count;
+                        current.add(&val);
                     }
                     None => {
                         self.data.insert(key, val);
