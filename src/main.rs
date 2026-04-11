@@ -11,7 +11,7 @@ use std::{
     thread::{self, ScopedJoinHandle},
 };
 
-use clap::{Parser, ValueEnum, builder::Str};
+use clap::{Parser, ValueEnum};
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use data_structures::DataHolder;
 
@@ -190,25 +190,20 @@ impl TotalReading {
 }
 
 pub(crate) mod data_structures {
-    use std::{
-        collections::HashMap,
-        hash::{BuildHasher, Hasher},
-    };
+    use std::hash::{BuildHasher, Hasher};
 
     use rustc_hash::{FxHashMap, FxHasher};
 
     use crate::{TotalReading, to_temperature, to_temperature_manual};
 
     pub(crate) struct DataHolder {
-        data: SplitHashMap,
-        names: FxHashMap<u64, Vec<u8>>,
+        data: FxHashMap<Vec<u8>, TotalReading>,
     }
 
     impl DataHolder {
         pub(crate) fn new() -> Self {
             DataHolder {
-                data: SplitHashMap::new(),
-                names: FxHashMap::default(),
+                data: FxHashMap::default(),
             }
         }
 
@@ -222,7 +217,7 @@ pub(crate) mod data_structures {
                 let mut iter = line.split(|char| char == &b';');
                 let name = iter.next().expect("Name to be available");
                 let temp = iter.next();
-                update_temperature(name, to_temperature_manual(temp.unwrap()), self);
+                update_temperature(name, to_temperature(temp.unwrap()), self);
             }
         }
 
@@ -234,7 +229,7 @@ pub(crate) mod data_structures {
                 let element = raw_data[index];
                 match element {
                     b'\n' => {
-                        let temperature = to_temperature(&raw_data[(middle + 1)..index]);
+                        let temperature = to_temperature_manual(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
                         index += 2; // name takes at least one byte so jump straight to the next one
@@ -249,8 +244,19 @@ pub(crate) mod data_structures {
         }
 
         pub(crate) fn merge(&mut self, data: DataHolder) {
-            self.data.merge(data.data);
-            self.names.extend(data.names);
+            for (key, val) in data.data {
+                match self.data.get_mut(&key) {
+                    Some(current) => {
+                        current.min_temp = current.min_temp.min(val.min_temp);
+                        current.max_temp = current.max_temp.max(val.max_temp);
+                        current.sum_temp += val.sum_temp;
+                        current.temp_reading_count += val.temp_reading_count;
+                    }
+                    None => {
+                        self.data.insert(key, val);
+                    }
+                }
+            }
         }
     }
 
@@ -278,59 +284,15 @@ pub(crate) mod data_structures {
         }
     }
 
-    struct SplitHashMap {
-        data: HashMap<u64, TotalReading, Fnv1aHashBuilder>,
-    }
-
-    impl SplitHashMap {
-        fn new() -> Self {
-            let hasher = Fnv1aHashBuilder {};
-            SplitHashMap {
-                data: HashMap::with_capacity_and_hasher(15000, hasher),
-            }
-        }
-
-        pub(crate) fn get_mut(&mut self, name: &u64) -> Option<&mut TotalReading> {
-            self.data.get_mut(name)
-        }
-
-        pub(crate) fn get(&self, name: &u64) -> Option<&TotalReading> {
-            self.data.get(name)
-        }
-
-        fn insert(&mut self, name: u64, value: TotalReading) {
-            self.data.insert(name, value);
-        }
-
-        fn merge(&mut self, other: SplitHashMap) {
-            for (key, value) in other.data.iter() {
-                match self.data.get_mut(key) {
-                    Some(reading) => reading.add(value),
-                    None => {
-                        self.data.insert(*key, value.clone());
-                    }
-                };
-            }
-        }
-    }
-
     pub(crate) fn prepare_result(data: DataHolder) -> Vec<(Vec<u8>, TotalReading)> {
-        let mut names: Vec<(u64, Vec<u8>)> = data.names.into_iter().collect();
-        names.sort_by_key(|el| el.1.clone());
-        names
-            .iter()
-            .flat_map(|el| {
-                data.data
-                    .get(&el.0)
-                    .map(|reading| (el.1.clone(), reading.clone()))
-            })
-            .collect()
+        let mut output: Vec<_> = data.data.into_iter().collect();
+        output.sort_by(|l, r| l.0.cmp(&r.0));
+        output
     }
 
     fn update_temperature(name: &[u8], value: i16, data_holder: &mut DataHolder) {
         let table = &mut data_holder.data;
-        let hash = get_hash(name);
-        match table.get_mut(&hash) {
+        match table.get_mut(name) {
             Some(raw_value) => {
                 raw_value.min_temp = raw_value.min_temp.min(value);
                 raw_value.max_temp = raw_value.max_temp.max(value);
@@ -339,17 +301,9 @@ pub(crate) mod data_structures {
             }
             None => {
                 let reading = TotalReading::new(value);
-                let name = name.to_vec();
-                data_holder.names.insert(hash, name);
-                table.insert(hash, reading);
+                table.insert(name.to_owned(), reading);
             }
         }
-    }
-
-    fn get_hash(data: &[u8]) -> u64 {
-        let mut hasher = FxHasher::default();
-        hasher.write(data);
-        hasher.finish()
     }
 }
 
