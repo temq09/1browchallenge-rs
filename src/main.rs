@@ -11,7 +11,7 @@ use std::{
     thread::{self, ScopedJoinHandle},
 };
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, ValueEnum, builder::Str};
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use data_structures::DataHolder;
 
@@ -50,7 +50,8 @@ fn single_thread_reader(file: File) -> Result<(), Error> {
     thread::scope(|s| {
         let read_task = s.spawn(move || {
             let mut reader = BufReader::new(file);
-            while read_and_send(&mut reader, &tx) {}
+            let mut tail = vec![0; 105];
+            read_and_send(&mut reader, &tx);
             drop(tx);
 
             read_blocking(read_thread_rx)
@@ -76,23 +77,31 @@ fn single_thread_reader(file: File) -> Result<(), Error> {
     Ok(())
 }
 
-fn read_and_send(reader: &mut BufReader<File>, tx: &Sender<Vec<u8>>) -> bool {
-    let chunk_size = 1 * 1024;
-    let mut data: Vec<u8> = vec![0; chunk_size];
-    let bytes_read = reader.read(&mut data).unwrap();
-    println!("Read {bytes_read}");
-    if bytes_read == 0 {
-        return false;
+fn read_and_send(reader: &mut BufReader<File>, tx: &Sender<Vec<u8>>) {
+    let mut tail = vec![0; 0];
+    loop {
+        let chunk_size = 64 * 1024;
+        let mut data: Vec<u8> = vec![0; chunk_size];
+        let read_start = tail.len();
+        data[..read_start].copy_from_slice(&tail);
+
+        if read_start == chunk_size {
+            panic!("Trying to read zero");
+        }
+
+        let bytes_read = reader.read(&mut data[read_start..]).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        let (shrink_to, _) = get_indicies(&data);
+        tail = data.split_off(shrink_to);
+        tail.drain(0..1);
+        tx.try_send(data).unwrap();
     }
-    let (shrink_to, seek_back) = get_indicies(&data[..bytes_read]);
-    data.truncate(shrink_to);
-    tx.try_send(data).unwrap();
-    reader.seek_relative(-seek_back + 2).unwrap();
-    true
 }
 
 fn get_indicies(data: &[u8]) -> (usize, i64) {
-    match data.iter().rposition(|char| *char == b'\n') {
+    match data.iter().rposition(|char| char == &b'\n') {
         Some(pos) => (pos, (data.len() - pos) as i64),
         None => (0, data.len() as i64),
     }
@@ -204,26 +213,19 @@ pub(crate) mod data_structures {
         }
 
         pub(crate) fn append(&mut self, raw_data: &[u8]) {
-            //self.append_manual_optimization(raw_data);
-            self.append_no_optimization(raw_data);
+            self.append_manual_optimization(raw_data);
+            //self.append_no_optimization(raw_data);
         }
 
         fn append_no_optimization(&mut self, raw_data: &[u8]) {
-            if raw_data.is_empty() {
-                return;
-            }
             for line in raw_data.split(|byte| byte == &b'\n') {
                 let mut iter = line.split(|char| char == &b';');
                 let name = iter.next().expect("Name to be available");
                 let temp = iter.next();
-                if temp.is_none() {
-                    continue;
-                }
                 update_temperature(name, to_temperature_manual(temp.unwrap()), self);
             }
         }
 
-        #[inline(never)]
         fn append_manual_optimization(&mut self, raw_data: &[u8]) {
             let mut start = 0;
             let mut middle = 0;
@@ -371,7 +373,6 @@ fn to_temperature(raw_data: &[u8]) -> i16 {
     temperature
 }
 
-#[inline(never)]
 pub fn to_temperature_manual(raw_data: &[u8]) -> i16 {
     let mut mul = 1;
     let data = if raw_data[0] == b'-' {
