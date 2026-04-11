@@ -363,11 +363,11 @@ fn to_temperature_simd(raw_data: &[u8]) -> i16 {
 fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>) {
     let mut buf_writer = BufWriter::new(writer);
     for (name, reading) in readings {
-        let mean = (reading.sum_temp / (reading.temp_reading_count as i64)) as f64 / 10.0;
+        let mean = (reading.sum_temp as f64 / reading.temp_reading_count as f64) / 10.0;
         buf_writer.write_all(name).unwrap();
         buf_writer
             .write_fmt(format_args!(
-                ";{};{};{}\n",
+                ";{};{:.1};{}\n",
                 reading.min_temp as f32 / 10.0,
                 mean,
                 reading.max_temp as f32 / 10.0
