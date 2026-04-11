@@ -50,7 +50,6 @@ fn single_thread_reader(file: File) -> Result<(), Error> {
     thread::scope(|s| {
         let read_task = s.spawn(move || {
             let mut reader = BufReader::new(file);
-            let mut tail = vec![0; 105];
             read_and_send(&mut reader, &tx);
             drop(tx);
 
@@ -163,7 +162,6 @@ fn naive_implementastion(file: File) -> Result<(), Error> {
     Ok(())
 }
 
-#[derive(Clone)]
 struct TotalReading {
     pub min_temp: i16,
     pub max_temp: i16,
@@ -192,7 +190,7 @@ impl TotalReading {
 pub(crate) mod data_structures {
     use std::hash::{BuildHasher, Hasher};
 
-    use rustc_hash::{FxHashMap, FxHasher};
+    use rustc_hash::FxHashMap;
 
     use crate::{TotalReading, to_temperature, to_temperature_manual};
 
@@ -370,9 +368,9 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
         buf_writer
             .write_fmt(format_args!(
                 ";{};{};{}\n",
-                reading.min_temp / 10,
+                reading.min_temp as f32 / 10.0,
                 mean,
-                reading.max_temp / 10
+                reading.max_temp as f32 / 10.0
             ))
             .unwrap();
     }
