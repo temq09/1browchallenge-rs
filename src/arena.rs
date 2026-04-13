@@ -2,7 +2,7 @@ use std::{
     cell::UnsafeCell,
     fs::File,
     hint,
-    io::{self, BufReader, Error, Read},
+    io::{BufReader, Error, Read},
     sync::{
         Arc,
         atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -12,12 +12,9 @@ use std::{
 
 use crossbeam::utils::CachePadded;
 
-use crate::{
-    data_structures::{self, DataHolder},
-    get_indicies, print_result,
-};
+use crate::{data_structures::DataHolder, get_indicies};
 
-pub(crate) fn read_arena(file: File) -> Result<(), Error> {
+pub(crate) fn read_arena(file: File) -> Result<DataHolder, Error> {
     let thread_amount = std::thread::available_parallelism().unwrap().get();
     println!("Parallelism {thread_amount}");
     thread::scope(|s| {
@@ -46,11 +43,8 @@ pub(crate) fn read_arena(file: File) -> Result<(), Error> {
 
         debug_log("Parsing done");
 
-        let result = data_structures::prepare_result(output);
-        print_result(&result, Box::new(io::stdout()));
-    });
-
-    Ok(())
+        Ok(output)
+    })
 }
 
 fn read_data_arena(reader: &mut BufReader<File>, arenas: Vec<Arc<DataChunk>>) {

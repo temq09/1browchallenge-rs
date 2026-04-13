@@ -5,12 +5,9 @@ use std::{
     thread::{self, ScopedJoinHandle},
 };
 
-use crate::{
-    data_structures::{self, DataHolder},
-    get_indicies,
-};
+use crate::{data_structures::DataHolder, get_indicies};
 
-pub(crate) fn parallel_readers(file: File) -> Result<(), Error> {
+pub(crate) fn parallel_readers(file: File) -> Result<DataHolder, Error> {
     let reader = BufReader::new(file);
     let receiver = Mutex::new(reader);
 
@@ -50,8 +47,6 @@ pub(crate) fn parallel_readers(file: File) -> Result<(), Error> {
             output.merge(result);
         }
 
-        let _result = data_structures::prepare_result(output);
-    });
-
-    Ok(())
+        Ok(output)
+    })
 }

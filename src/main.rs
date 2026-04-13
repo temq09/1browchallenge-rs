@@ -4,7 +4,7 @@ use core::simd;
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Write},
     path::PathBuf,
     simd::{Select, cmp::SimdPartialEq, u8x8},
 };
@@ -41,11 +41,15 @@ fn main() {
     let args = Args::parse();
 
     let file = File::open(args.input).unwrap();
-    let _ = match args.mode.unwrap_or(Mode::Default) {
+    let output = match args.mode.unwrap_or(Mode::Default) {
         Mode::Default => parallel_readers(file),
         Mode::ReadSingle => single_thread_reader(file),
         Mode::Arena => read_arena(file),
-    };
+    }
+    .expect("Data read");
+
+    let result = data_structures::prepare_result(output);
+    print_result(&result, Box::new(io::stdout()));
 }
 
 fn get_indicies(data: &[u8]) -> (usize, i64) {

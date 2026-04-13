@@ -1,17 +1,14 @@
 use std::{
     fs::File,
-    io::{self, BufReader, Error, Read},
+    io::{BufReader, Error, Read},
     thread::{self, ScopedJoinHandle},
 };
 
 use crossbeam::channel::{Receiver, Sender, unbounded};
 
-use crate::{
-    data_structures::{self, DataHolder},
-    get_indicies, print_result,
-};
+use crate::{data_structures::DataHolder, get_indicies};
 
-pub(crate) fn single_thread_reader(file: File) -> Result<(), Error> {
+pub(crate) fn single_thread_reader(file: File) -> Result<DataHolder, Error> {
     let thread_amount = std::thread::available_parallelism().unwrap().get();
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = unbounded();
     println!("Parallelism {thread_amount}");
@@ -38,13 +35,8 @@ pub(crate) fn single_thread_reader(file: File) -> Result<(), Error> {
             output.merge(result);
         }
 
-        println!("Parsing done");
-
-        let result = data_structures::prepare_result(output);
-        print_result(&result, Box::new(io::stdout()));
-    });
-
-    Ok(())
+        Ok(output)
+    })
 }
 
 fn read_blocking(rx: Receiver<Vec<u8>>) -> DataHolder {
