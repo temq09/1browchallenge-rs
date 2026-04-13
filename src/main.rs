@@ -2,23 +2,37 @@
 #![feature(portable_simd)]
 use core::simd;
 use std::{
+    cell::UnsafeCell,
     cmp::{max, min},
     fs::File,
+    hint,
     io::{self, BufReader, BufWriter, Error, Read, Write},
     path::PathBuf,
     simd::{Select, cmp::SimdPartialEq, u8x8},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+    },
     thread::{self, ScopedJoinHandle},
+    time::Instant,
 };
 
 use clap::{Parser, ValueEnum};
-use crossbeam::channel::{Receiver, Sender, unbounded};
+use crossbeam::{
+    channel::{Receiver, Sender, unbounded},
+    utils::CachePadded,
+};
 use data_structures::DataHolder;
+
+use crate::arena::read_arena;
+
+mod arena;
 
 #[derive(Clone, Copy, ValueEnum, Debug)]
 enum Mode {
     Default,
     ReadSingle,
+    Arena,
 }
 
 #[derive(Parser, Debug)]
@@ -39,6 +53,7 @@ fn main() {
     let _ = match args.mode.unwrap_or(Mode::Default) {
         Mode::Default => naive_implementastion(file),
         Mode::ReadSingle => single_thread_reader(file),
+        Mode::Arena => read_arena(file),
     };
 }
 
@@ -50,7 +65,9 @@ fn single_thread_reader(file: File) -> Result<(), Error> {
     thread::scope(|s| {
         let read_task = s.spawn(move || {
             let mut reader = BufReader::new(file);
+            let start = Instant::now();
             read_and_send(&mut reader, &tx);
+            println!("Read done for: {}", start.elapsed().as_millis());
             drop(tx);
 
             read_blocking(read_thread_rx)
@@ -68,6 +85,8 @@ fn single_thread_reader(file: File) -> Result<(), Error> {
             let result = handle.join().unwrap();
             output.merge(result);
         }
+
+        println!("Parsing done");
 
         let result = data_structures::prepare_result(output);
         print_result(&result, Box::new(io::stdout()));
