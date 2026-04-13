@@ -2,31 +2,22 @@
 #![feature(portable_simd)]
 use core::simd;
 use std::{
-    cell::UnsafeCell,
     cmp::{max, min},
     fs::File,
-    hint,
-    io::{self, BufReader, BufWriter, Error, Read, Write},
+    io::{BufReader, BufWriter, Error, Read, Write},
     path::PathBuf,
     simd::{Select, cmp::SimdPartialEq, u8x8},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
-    },
+    sync::Mutex,
     thread::{self, ScopedJoinHandle},
-    time::Instant,
 };
 
 use clap::{Parser, ValueEnum};
-use crossbeam::{
-    channel::{Receiver, Sender, unbounded},
-    utils::CachePadded,
-};
 use data_structures::DataHolder;
 
-use crate::arena::read_arena;
+use crate::{arena::read_arena, single_reader::single_thread_reader};
 
 mod arena;
+mod single_reader;
 
 #[derive(Clone, Copy, ValueEnum, Debug)]
 enum Mode {
@@ -57,82 +48,11 @@ fn main() {
     };
 }
 
-fn single_thread_reader(file: File) -> Result<(), Error> {
-    let thread_amount = std::thread::available_parallelism().unwrap().get();
-    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = unbounded();
-    println!("Parallelism {thread_amount}");
-    let read_thread_rx = rx.clone();
-    thread::scope(|s| {
-        let read_task = s.spawn(move || {
-            let mut reader = BufReader::new(file);
-            let start = Instant::now();
-            read_and_send(&mut reader, &tx);
-            println!("Read done for: {}", start.elapsed().as_millis());
-            drop(tx);
-
-            read_blocking(read_thread_rx)
-        });
-
-        let results = (0..(thread_amount - 1))
-            .map(|_| {
-                let local_rx = rx.clone();
-                s.spawn(move || read_blocking(local_rx))
-            })
-            .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
-
-        let mut output = read_task.join().unwrap();
-        for handle in results {
-            let result = handle.join().unwrap();
-            output.merge(result);
-        }
-
-        println!("Parsing done");
-
-        let result = data_structures::prepare_result(output);
-        print_result(&result, Box::new(io::stdout()));
-    });
-
-    Ok(())
-}
-
-fn read_and_send(reader: &mut BufReader<File>, tx: &Sender<Vec<u8>>) {
-    let mut tail = vec![0; 0];
-    loop {
-        let chunk_size = 64 * 1024;
-        let mut data: Vec<u8> = vec![0; chunk_size];
-        let read_start = tail.len();
-        data[..read_start].copy_from_slice(&tail);
-
-        if read_start == chunk_size {
-            panic!("Trying to read zero");
-        }
-
-        let bytes_read = reader.read(&mut data[read_start..]).unwrap();
-        if bytes_read == 0 {
-            break;
-        }
-        let (shrink_to, _) = get_indicies(&data);
-        tail = data.split_off(shrink_to);
-        tail.drain(0..1);
-        tx.try_send(data).unwrap();
-    }
-}
-
 fn get_indicies(data: &[u8]) -> (usize, i64) {
     match data.iter().rposition(|char| char == &b'\n') {
         Some(pos) => (pos, (data.len() - pos) as i64),
         None => (0, data.len() as i64),
     }
-}
-
-fn read_blocking(rx: Receiver<Vec<u8>>) -> DataHolder {
-    let mut global_data_holder = DataHolder::new();
-
-    while let Ok(data) = rx.recv() {
-        global_data_holder.append(&data);
-    }
-
-    global_data_holder
 }
 
 fn naive_implementastion(file: File) -> Result<(), Error> {
