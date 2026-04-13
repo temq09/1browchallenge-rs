@@ -4,19 +4,19 @@ use core::simd;
 use std::{
     cmp::{max, min},
     fs::File,
-    io::{BufReader, BufWriter, Error, Read, Write},
+    io::{BufWriter, Write},
     path::PathBuf,
     simd::{Select, cmp::SimdPartialEq, u8x8},
-    sync::Mutex,
-    thread::{self, ScopedJoinHandle},
 };
 
 use clap::{Parser, ValueEnum};
-use data_structures::DataHolder;
 
-use crate::{arena::read_arena, single_reader::single_thread_reader};
+use crate::{
+    arena::read_arena, parallel_readers::parallel_readers, single_reader::single_thread_reader,
+};
 
 mod arena;
+mod parallel_readers;
 mod single_reader;
 
 #[derive(Clone, Copy, ValueEnum, Debug)]
@@ -42,7 +42,7 @@ fn main() {
 
     let file = File::open(args.input).unwrap();
     let _ = match args.mode.unwrap_or(Mode::Default) {
-        Mode::Default => naive_implementastion(file),
+        Mode::Default => parallel_readers(file),
         Mode::ReadSingle => single_thread_reader(file),
         Mode::Arena => read_arena(file),
     };
@@ -53,52 +53,6 @@ fn get_indicies(data: &[u8]) -> (usize, i64) {
         Some(pos) => (pos, (data.len() - pos) as i64),
         None => (0, data.len() as i64),
     }
-}
-
-fn naive_implementastion(file: File) -> Result<(), Error> {
-    let reader = BufReader::new(file);
-    let receiver = Mutex::new(reader);
-
-    let thread_amount = std::thread::available_parallelism().unwrap().get();
-    println!("Parallelism {}", thread_amount);
-    thread::scope(|s| {
-        let results = (0..thread_amount)
-            .map(|_| {
-                s.spawn(|| {
-                    let mut data_holder = DataHolder::new();
-                    let mut buf = vec![0; 64 * 1024];
-
-                    loop {
-                        let mut reader = receiver.lock().unwrap();
-
-                        let count = reader.read(buf.as_mut()).unwrap();
-
-                        if count == 0 {
-                            break;
-                        }
-                        let buf = &buf[..count];
-                        let (non_complete_data_index, seek_to) = get_indicies(buf);
-                        let _ = reader.seek_relative(-seek_to);
-                        drop(reader);
-
-                        data_holder.append(&buf[..non_complete_data_index]);
-                    }
-
-                    data_holder
-                })
-            })
-            .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
-
-        let mut output = DataHolder::new();
-        for handle in results {
-            let result = handle.join().unwrap();
-            output.merge(result);
-        }
-
-        let _result = data_structures::prepare_result(output);
-    });
-
-    Ok(())
 }
 
 struct TotalReading {
