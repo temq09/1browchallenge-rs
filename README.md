@@ -38,9 +38,15 @@ Note: N is amount of cores available on the CPU
 Dataset: 1 billion rows
 The input file is not mapped to the memory, so everytime it's read from disk
 
+### Baseline for comparison
+For the baseline a java implementation from the original repo was used
+```shell
+./calculate_average_gonix.sh  0.00s user 0.01s system 0% cpu 1.941 total
+```
+
 ### Macbook Pro
 Config:
-- Macbook Pro M1 64GB 2021
+- Macbook Pro MAX M1 64GB 2021
 - OS: Tahoe 26.4.1
 - Cores amount: 10
 
