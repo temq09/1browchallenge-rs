@@ -30,7 +30,7 @@ pub(crate) fn parallel_readers(file: File) -> Result<DataHolder, Error> {
                         }
                         let buf = &buf[..count];
                         let (non_complete_data_index, seek_to) = get_indicies(buf);
-                        let _ = reader.seek_relative(-seek_to);
+                        let _ = reader.seek_relative(-seek_to + 1);
                         drop(reader);
 
                         data_holder.append(&buf[..non_complete_data_index]);
