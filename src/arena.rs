@@ -1,3 +1,4 @@
+use std::thread::{self};
 use std::{
     cell::UnsafeCell,
     fs::File,
@@ -7,33 +8,28 @@ use std::{
         Arc,
         atomic::{AtomicU8, AtomicUsize, Ordering},
     },
-    thread::{self, ScopedJoinHandle},
 };
 
 use crossbeam::utils::CachePadded;
 
 use crate::{data_structures::DataHolder, get_indicies};
 
-pub(crate) fn read_arena(file: File) -> Result<DataHolder, Error> {
+pub(crate) fn read_arena(file: File, chunks_per_thread: usize) -> Result<DataHolder, Error> {
     let thread_amount = std::thread::available_parallelism().unwrap().get();
     println!("Parallelism {thread_amount}");
+    let pool_size = (thread_amount - 1) * chunks_per_thread;
+    let mut chunks = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
+        chunks.push(Arc::new(CachePadded::new(DataChunk::new())));
+    }
     thread::scope(|s| {
-        let reader_threads = thread_amount - 1;
-        let mut chunks = Vec::with_capacity(reader_threads);
-        for _ in 0..reader_threads {
-            chunks.push(Arc::new(DataChunk::new()));
-        }
-        let results = (0..(thread_amount - 1))
-            .map(|i| {
-                let data_chunk = chunks
-                    .get(i)
-                    .expect("Element should be initialized")
-                    .clone();
-                s.spawn(|| process_data(data_chunk))
-            })
-            .collect::<Vec<ScopedJoinHandle<DataHolder>>>();
+        let mut results = Vec::with_capacity(chunks.len());
 
-        read_data_arena(&mut BufReader::new(file), chunks);
+        for subchunks in chunks.chunks_exact(chunks_per_thread) {
+            let handle = s.spawn(|| process_data(subchunks));
+            results.push(handle);
+        }
+        read_data_arena(&mut BufReader::new(file), &chunks, chunks_per_thread);
 
         let mut output = DataHolder::new();
         for handle in results {
@@ -47,8 +43,12 @@ pub(crate) fn read_arena(file: File) -> Result<DataHolder, Error> {
     })
 }
 
-fn read_data_arena(reader: &mut BufReader<File>, arenas: Vec<Arc<DataChunk>>) {
-    read_data_loop(reader, &arenas);
+fn read_data_arena(
+    reader: &mut BufReader<File>,
+    arenas: &[Arc<CachePadded<DataChunk>>],
+    chunks_per_thread: usize,
+) {
+    read_data_loop(reader, arenas, chunks_per_thread);
     debug_log("Read complete, terminate arenas");
     // Data processed, set completed flag to each state
     for arena in arenas {
@@ -59,14 +59,25 @@ fn read_data_arena(reader: &mut BufReader<File>, arenas: Vec<Arc<DataChunk>>) {
     debug_log("All terminated");
 }
 
-fn read_data_loop(reader: &mut BufReader<File>, arenas: &[Arc<DataChunk>]) {
+fn read_data_loop(
+    reader: &mut BufReader<File>,
+    arenas: &[Arc<CachePadded<DataChunk>>],
+    chunks_per_thread: usize,
+) {
     debug_log("Start read data loop");
     let mut tail = [0; 106];
     let mut tail_len = 0;
+    let mut start = 0;
+    let mut misses: u128 = 0;
+    let mut total = 0;
     loop {
-        for arena in arenas {
+        for i in (start..arenas.len()).step_by(chunks_per_thread) {
+            let arena = &arenas[i];
+            total += 1;
+
             debug_log("Acquire arena");
             if arena.get_current_state() != AWAIT_WRITE {
+                misses += 1;
                 continue;
             }
             arena.accuire_write();
@@ -80,6 +91,7 @@ fn read_data_loop(reader: &mut BufReader<File>, arenas: &[Arc<DataChunk>]) {
             if bytes_read == 0 {
                 debug_log("Read complete");
                 arena.set_state(COMPLETED, Ordering::Relaxed);
+                println!("Acquire misses {}, total {}", misses, total);
                 return;
             }
             let total_len = tail_len + bytes_read;
@@ -94,27 +106,44 @@ fn read_data_loop(reader: &mut BufReader<File>, arenas: &[Arc<DataChunk>]) {
             arena.set_state(AWAIT_READ, Ordering::Release);
             debug_log("Released");
         }
+        start = (start + 1) % chunks_per_thread;
         debug_log("read data loop wrap");
     }
 }
 
-fn process_data(chunk: Arc<DataChunk>) -> DataHolder {
+fn process_data(chunks: &[Arc<CachePadded<DataChunk>>]) -> DataHolder {
     let mut data = DataHolder::new();
-    while chunk.accuire_read() {
-        debug_log("Process data");
-        // data_len is not required to be atomic because accuire_read has Ordering::Acquire
-        // which makes HP behavior for this read
-        let data_len = chunk.data_len.load(Ordering::Relaxed);
-        let buf = unsafe { &(&(*chunk.data.get()))[0..data_len] };
+    'outer: loop {
+        for chunk in chunks {
+            if chunk.accuire_read() {
+                process_chunk(chunk, &mut data);
+            } else {
+                break 'outer;
+            }
+        }
+    }
 
-        data.append(buf);
-
-        // Read has completed. Relaxed because writer is not interested in any data
-        // as they will be replaced anyway. So only the fact the reader is done is enough.
-        chunk.set_state(AWAIT_WRITE, Ordering::Relaxed);
+    for chunk in chunks {
+        if chunk.accuire_read() {
+            process_chunk(chunk, &mut data);
+        }
     }
 
     data
+}
+
+fn process_chunk(chunk: &DataChunk, res: &mut DataHolder) {
+    debug_log("Process data");
+    // data_len is not required to be atomic because accuire_read has Ordering::Acquire
+    // which makes HP behavior for this read
+    let data_len = chunk.data_len.load(Ordering::Relaxed);
+    let buf = unsafe { &(&(*chunk.data.get()))[0..data_len] };
+
+    res.append(buf);
+
+    // Read has completed. Relaxed because writer is not interested in any data
+    // as they will be replaced anyway. So only the fact the reader is done is enough.
+    chunk.set_state(AWAIT_WRITE, Ordering::Relaxed);
 }
 
 const DEBUG_LOG_ENABLED: bool = false;
@@ -126,8 +155,9 @@ fn debug_log(message: &str) {
 
 unsafe impl Sync for DataChunk {}
 
+#[derive(Debug)]
 struct DataChunk {
-    state: CachePadded<AtomicU8>,
+    state: AtomicU8,
     data_len: AtomicUsize,
     data: UnsafeCell<Box<[u8]>>,
 }
@@ -155,7 +185,7 @@ const COMPLETED: u8 = 4; // No data will be provided anymore, reader must comple
 impl DataChunk {
     fn new() -> Self {
         DataChunk {
-            state: CachePadded::new(AtomicU8::new(AWAIT_WRITE)),
+            state: AtomicU8::new(AWAIT_WRITE),
             data: UnsafeCell::new(vec![0; 66 * 1024].into_boxed_slice()),
             data_len: AtomicUsize::new(0),
         }

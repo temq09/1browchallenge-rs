@@ -35,6 +35,10 @@ struct Args {
     /// Path to the input file
     #[arg(short, long)]
     input: PathBuf,
+
+    /// Path to the input file
+    #[arg(short, long)]
+    chunks_size: Option<usize>,
 }
 
 fn main() {
@@ -44,7 +48,7 @@ fn main() {
     let output = match args.mode.unwrap_or(Mode::Default) {
         Mode::Default => parallel_readers(file),
         Mode::ReadSingle => single_thread_reader(file),
-        Mode::Arena => read_arena(file),
+        Mode::Arena => read_arena(file, args.chunks_size.unwrap_or(10)),
     }
     .expect("Data read");
 
