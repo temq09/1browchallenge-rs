@@ -93,7 +93,7 @@ pub(crate) mod data_structures {
 
     use rustc_hash::FxHashMap;
 
-    use crate::{TotalReading, to_temperature, to_temperature_manual};
+    use crate::{TotalReading, to_temperature, to_temperature_branchless, to_temperature_manual};
 
     pub(crate) struct DataHolder {
         data: FxHashMap<Vec<u8>, TotalReading>,
@@ -128,7 +128,7 @@ pub(crate) mod data_structures {
                 let element = raw_data[index];
                 match element {
                     b'\n' => {
-                        let temperature = to_temperature_manual(&raw_data[(middle + 1)..index]);
+                        let temperature = to_temperature_branchless(&raw_data[(middle + 1)..index]);
                         update_temperature(&raw_data[start..middle], temperature, self);
                         start = index + 1;
                         index += 2; // name takes at least one byte so jump straight to the next one
@@ -204,6 +204,20 @@ pub(crate) mod data_structures {
 }
 
 static MULTIPLIYERS: [i16; 3] = [1, 10, 100];
+
+fn to_temperature_branchless(raw_data: &[u8]) -> i16 {
+    let len = raw_data.len();
+    assert!(len >= 3);
+    let sign = i16::from(raw_data[0] != b'-') * 2 - 1;
+    let t1 = i16::from(raw_data[len - 1] - b'0');
+    let t2 = i16::from(raw_data[len - 3] - b'0') * 10;
+
+    let t3_index = if raw_data[0] == b'-' { 1 } else { 0 };
+    let mul = if len - t3_index == 4 { 100 } else { 0 };
+    let t3 = i16::from(raw_data[t3_index] - b'0') * mul;
+
+    sign * (t1 + t2 + t3)
+}
 
 fn to_temperature(raw_data: &[u8]) -> i16 {
     let mut temperature = 0;
@@ -281,7 +295,10 @@ fn print_result(readings: &Vec<(Vec<u8>, TotalReading)>, writer: Box<dyn Write>)
 mod test {
     use std::io::{BufRead, Read};
 
-    use crate::{get_indicies, to_temperature, to_temperature_manual, to_temperature_simd};
+    use crate::{
+        get_indicies, to_temperature, to_temperature_branchless, to_temperature_manual,
+        to_temperature_simd,
+    };
     extern crate test;
 
     #[test]
@@ -320,6 +337,14 @@ mod test {
     }
 
     #[test]
+    fn test_to_temperature_branchless() {
+        assert_eq!(to_temperature_branchless(b"1.2"), 12);
+        assert_eq!(to_temperature_branchless(b"12.0"), 120);
+        assert_eq!(to_temperature_branchless(b"-12.0"), -120);
+        assert_eq!(to_temperature_branchless(b"-1.2"), -12);
+    }
+
+    #[test]
     fn test_get_indicies() {
         assert_eq!(get_indicies("aaaaa\nbbb".as_bytes()), (5, 3));
         assert_eq!(get_indicies("aaaaaaa\nbbb".as_bytes()), (7, 3));
@@ -340,5 +365,10 @@ mod test {
     #[bench]
     fn bench_temperature_manual(b: &mut test::Bencher) {
         b.iter(|| test::black_box(to_temperature_manual(b"-12.3")));
+    }
+
+    #[bench]
+    fn bench_temperature_branchless(b: &mut test::Bencher) {
+        b.iter(|| test::black_box(to_temperature_branchless(b"-12.3")));
     }
 }
